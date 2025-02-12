@@ -223,7 +223,7 @@ func (p *BeaconDbBlocker) Blobs(ctx context.Context, id string, indices []uint64
 		return nil, &core.RpcError{Err: errors.Wrap(err, "failed to retrieve block from db"), Reason: core.Internal}
 	}
 	// if block is not in the retention window  return 200 w/ empty list
-	if !params.WithinDAPeriod(slots.ToEpoch(b.Block().Slot()), slots.ToEpoch(p.GenesisTimeFetcher.CurrentSlot())) {
+	if !p.BlobStorage.WithinRetentionPeriod(slots.ToEpoch(b.Block().Slot()), slots.ToEpoch(p.GenesisTimeFetcher.CurrentSlot())) {
 		return make([]*blocks.VerifiedROBlob, 0), nil
 	}
 	commitments, err := b.Block().Body().BlobKzgCommitments()
@@ -235,16 +235,10 @@ func (p *BeaconDbBlocker) Blobs(ctx context.Context, id string, indices []uint64
 		return make([]*blocks.VerifiedROBlob, 0), nil
 	}
 	if len(indices) == 0 {
-		m, err := p.BlobStorage.Indices(bytesutil.ToBytes32(root))
-		if err != nil {
-			log.WithFields(log.Fields{
-				"blockRoot": hexutil.Encode(root),
-			}).Error(errors.Wrapf(err, "could not retrieve blob indices for root %#x", root))
-			return nil, &core.RpcError{Err: fmt.Errorf("could not retrieve blob indices for root %#x", root), Reason: core.Internal}
-		}
-		for k, v := range m {
-			if v {
-				indices = append(indices, uint64(k))
+		sum := p.BlobStorage.Summary(bytesutil.ToBytes32(root))
+		for i := range commitments {
+			if sum.HasIndex(uint64(i)) {
+				indices = append(indices, uint64(i))
 			}
 		}
 	}

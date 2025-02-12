@@ -10,13 +10,14 @@ import (
 	"github.com/pkg/errors"
 	ssz "github.com/prysmaticlabs/fastssz"
 	"github.com/prysmaticlabs/prysm/v5/beacon-chain/core/altair"
+	"github.com/prysmaticlabs/prysm/v5/beacon-chain/core/helpers"
 	"github.com/prysmaticlabs/prysm/v5/config/params"
 	"github.com/prysmaticlabs/prysm/v5/crypto/hash"
 	"github.com/prysmaticlabs/prysm/v5/monitoring/tracing"
+	"github.com/prysmaticlabs/prysm/v5/monitoring/tracing/trace"
 	ethpb "github.com/prysmaticlabs/prysm/v5/proto/prysm/v1alpha1"
 	"github.com/prysmaticlabs/prysm/v5/time/slots"
 	"github.com/sirupsen/logrus"
-	"go.opencensus.io/trace"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -55,7 +56,7 @@ func (s *Service) Broadcast(ctx context.Context, msg proto.Message) error {
 
 // BroadcastAttestation broadcasts an attestation to the p2p network, the message is assumed to be
 // broadcasted to the current fork.
-func (s *Service) BroadcastAttestation(ctx context.Context, subnet uint64, att *ethpb.Attestation) error {
+func (s *Service) BroadcastAttestation(ctx context.Context, subnet uint64, att ethpb.Att) error {
 	if att == nil {
 		return errors.New("attempted to broadcast nil attestation")
 	}
@@ -95,7 +96,7 @@ func (s *Service) BroadcastSyncCommitteeMessage(ctx context.Context, subnet uint
 	return nil
 }
 
-func (s *Service) internalBroadcastAttestation(ctx context.Context, subnet uint64, att *ethpb.Attestation, forkDigest [4]byte) {
+func (s *Service) internalBroadcastAttestation(ctx context.Context, subnet uint64, att ethpb.Att, forkDigest [4]byte) {
 	_, span := trace.StartSpan(ctx, "p2p.internalBroadcastAttestation")
 	defer span.End()
 	ctx = trace.NewContext(context.Background(), span) // clear parent context / deadline.
@@ -109,10 +110,10 @@ func (s *Service) internalBroadcastAttestation(ctx context.Context, subnet uint6
 	hasPeer := s.hasPeerWithSubnet(attestationToTopic(subnet, forkDigest))
 	s.subnetLocker(subnet).RUnlock()
 
-	span.AddAttributes(
+	span.SetAttributes(
 		trace.BoolAttribute("hasPeer", hasPeer),
-		trace.Int64Attribute("slot", int64(att.Data.Slot)), // lint:ignore uintcast -- It's safe to do this for tracing.
-		trace.Int64Attribute("subnet", int64(subnet)),      // lint:ignore uintcast -- It's safe to do this for tracing.
+		trace.Int64Attribute("slot", int64(att.GetData().Slot)), // lint:ignore uintcast -- It's safe to do this for tracing.
+		trace.Int64Attribute("subnet", int64(subnet)),           // lint:ignore uintcast -- It's safe to do this for tracing.
 	)
 
 	if !hasPeer {
@@ -137,11 +138,11 @@ func (s *Service) internalBroadcastAttestation(ctx context.Context, subnet uint6
 	// In the event our attestation is outdated and beyond the
 	// acceptable threshold, we exit early and do not broadcast it.
 	currSlot := slots.CurrentSlot(uint64(s.genesisTime.Unix()))
-	if att.Data.Slot+params.BeaconConfig().SlotsPerEpoch < currSlot {
+	if err := helpers.ValidateAttestationTime(att.GetData().Slot, s.genesisTime, params.BeaconConfig().MaximumGossipClockDisparityDuration()); err != nil {
 		log.WithFields(logrus.Fields{
-			"attestationSlot": att.Data.Slot,
+			"attestationSlot": att.GetData().Slot,
 			"currentSlot":     currSlot,
-		}).Warning("Attestation is too old to broadcast, discarding it")
+		}).WithError(err).Debug("Attestation is too old to broadcast, discarding it")
 		return
 	}
 
@@ -162,13 +163,13 @@ func (s *Service) broadcastSyncCommittee(ctx context.Context, subnet uint64, sMs
 
 	// Ensure we have peers with this subnet.
 	// This adds in a special value to the subnet
-	// to ensure that we can re-use the same subnet locker.
+	// to ensure that we can reuse the same subnet locker.
 	wrappedSubIdx := subnet + syncLockerVal
 	s.subnetLocker(wrappedSubIdx).RLock()
 	hasPeer := s.hasPeerWithSubnet(syncCommitteeToTopic(subnet, forkDigest))
 	s.subnetLocker(wrappedSubIdx).RUnlock()
 
-	span.AddAttributes(
+	span.SetAttributes(
 		trace.BoolAttribute("hasPeer", hasPeer),
 		trace.Int64Attribute("slot", int64(sMsg.Slot)), // lint:ignore uintcast -- It's safe to do this for tracing.
 		trace.Int64Attribute("subnet", int64(subnet)),  // lint:ignore uintcast -- It's safe to do this for tracing.
@@ -272,7 +273,7 @@ func (s *Service) broadcastObject(ctx context.Context, obj ssz.Marshaler, topic 
 	ctx, span := trace.StartSpan(ctx, "p2p.broadcastObject")
 	defer span.End()
 
-	span.AddAttributes(trace.StringAttribute("topic", topic))
+	span.SetAttributes(trace.StringAttribute("topic", topic))
 
 	buf := new(bytes.Buffer)
 	if _, err := s.Encoding().EncodeGossip(buf, obj); err != nil {
@@ -281,12 +282,12 @@ func (s *Service) broadcastObject(ctx context.Context, obj ssz.Marshaler, topic 
 		return err
 	}
 
-	if span.IsRecordingEvents() {
+	if span.IsRecording() {
 		id := hash.FastSum64(buf.Bytes())
 		messageLen := int64(buf.Len())
 		// lint:ignore uintcast -- It's safe to do this for tracing.
 		iid := int64(id)
-		span.AddMessageSendEvent(iid, messageLen /*uncompressed*/, messageLen /*compressed*/)
+		span = trace.AddMessageSendEvent(span, iid, messageLen /*uncompressed*/, messageLen /*compressed*/)
 	}
 	if err := s.PublishToTopic(ctx, topic+s.Encoding().ProtocolSuffix(), buf.Bytes()); err != nil {
 		err := errors.Wrap(err, "could not publish message")

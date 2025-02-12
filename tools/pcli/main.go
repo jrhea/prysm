@@ -209,14 +209,6 @@ var stateTransitionCommand = &cli.Command{
 	Action: func(c *cli.Context) error {
 		if network != "" {
 			switch network {
-			case params.PraterName:
-				if err := params.SetActive(params.PraterConfig()); err != nil {
-					log.Fatal(err)
-				}
-			case params.GoerliName:
-				if err := params.SetActive(params.PraterConfig()); err != nil {
-					log.Fatal(err)
-				}
 			case params.SepoliaName:
 				if err := params.SetActive(params.SepoliaConfig()); err != nil {
 					log.Fatal(err)
@@ -307,7 +299,7 @@ var stateTransitionCommand = &cli.Command{
 
 func main() {
 	customFormatter := new(prefixed.TextFormatter)
-	customFormatter.TimestampFormat = "2006-01-02 15:04:05"
+	customFormatter.TimestampFormat = time.DateTime
 	customFormatter.FullTimestamp = true
 	log.SetFormatter(customFormatter)
 	app := cli.App{}

@@ -8,14 +8,15 @@ import (
 	"github.com/pkg/errors"
 	"github.com/prysmaticlabs/prysm/v5/beacon-chain/core/blocks"
 	"github.com/prysmaticlabs/prysm/v5/beacon-chain/core/helpers"
-	"github.com/prysmaticlabs/prysm/v5/beacon-chain/core/time"
+	coretime "github.com/prysmaticlabs/prysm/v5/beacon-chain/core/time"
 	"github.com/prysmaticlabs/prysm/v5/beacon-chain/state"
 	"github.com/prysmaticlabs/prysm/v5/config/params"
 	"github.com/prysmaticlabs/prysm/v5/consensus-types/primitives"
 	"github.com/prysmaticlabs/prysm/v5/container/slice"
+	"github.com/prysmaticlabs/prysm/v5/monitoring/tracing/trace"
 	ethpb "github.com/prysmaticlabs/prysm/v5/proto/prysm/v1alpha1"
+	"github.com/prysmaticlabs/prysm/v5/runtime/version"
 	"github.com/trailofbits/go-mutexasserts"
-	"go.opencensus.io/trace"
 )
 
 // NewPool returns an initialized attester slashing and proposer slashing pool.
@@ -30,7 +31,7 @@ func NewPool() *Pool {
 // PendingAttesterSlashings returns attester slashings that are able to be included into a block.
 // This method will return the amount of pending attester slashings for a block transition unless parameter `noLimit` is true
 // to indicate the request is for noLimit pending items.
-func (p *Pool) PendingAttesterSlashings(ctx context.Context, state state.ReadOnlyBeaconState, noLimit bool) []*ethpb.AttesterSlashing {
+func (p *Pool) PendingAttesterSlashings(ctx context.Context, state state.ReadOnlyBeaconState, noLimit bool) []ethpb.AttSlashing {
 	p.lock.Lock()
 	defer p.lock.Unlock()
 	_, span := trace.StartSpan(ctx, "operations.PendingAttesterSlashing")
@@ -43,10 +44,15 @@ func (p *Pool) PendingAttesterSlashings(ctx context.Context, state state.ReadOnl
 
 	// Allocate pending slice with a capacity of maxAttesterSlashings or len(p.pendingAttesterSlashing)) depending on the request.
 	maxSlashings := params.BeaconConfig().MaxAttesterSlashings
+
+	// EIP-7549: Beginning from Electra, the max attester slashings is reduced to 1.
+	if state.Version() >= version.Electra {
+		maxSlashings = params.BeaconConfig().MaxAttesterSlashingsElectra
+	}
 	if noLimit {
 		maxSlashings = uint64(len(p.pendingAttesterSlashing))
 	}
-	pending := make([]*ethpb.AttesterSlashing, 0, maxSlashings)
+	pending := make([]ethpb.AttSlashing, 0, maxSlashings)
 	for i := 0; i < len(p.pendingAttesterSlashing); i++ {
 		if uint64(len(pending)) >= maxSlashings {
 			break
@@ -63,7 +69,10 @@ func (p *Pool) PendingAttesterSlashings(ctx context.Context, state state.ReadOnl
 			continue
 		}
 		attSlashing := slashing.attesterSlashing
-		slashedVal := slice.IntersectionUint64(attSlashing.Attestation_1.AttestingIndices, attSlashing.Attestation_2.AttestingIndices)
+		slashedVal := slice.IntersectionUint64(
+			attSlashing.FirstAttestation().GetAttestingIndices(),
+			attSlashing.SecondAttestation().GetAttestingIndices(),
+		)
 		for _, idx := range slashedVal {
 			included[primitives.ValidatorIndex(idx)] = true
 		}
@@ -118,7 +127,7 @@ func (p *Pool) PendingProposerSlashings(ctx context.Context, state state.ReadOnl
 func (p *Pool) InsertAttesterSlashing(
 	ctx context.Context,
 	state state.ReadOnlyBeaconState,
-	slashing *ethpb.AttesterSlashing,
+	slashing ethpb.AttSlashing,
 ) error {
 	p.lock.Lock()
 	defer p.lock.Unlock()
@@ -129,7 +138,7 @@ func (p *Pool) InsertAttesterSlashing(
 		return errors.Wrap(err, "could not verify attester slashing")
 	}
 
-	slashedVal := slice.IntersectionUint64(slashing.Attestation_1.AttestingIndices, slashing.Attestation_2.AttestingIndices)
+	slashedVal := slice.IntersectionUint64(slashing.FirstAttestation().GetAttestingIndices(), slashing.SecondAttestation().GetAttestingIndices())
 	cantSlash := make([]uint64, 0, len(slashedVal))
 	slashingReason := ""
 	for _, val := range slashedVal {
@@ -229,10 +238,10 @@ func (p *Pool) InsertProposerSlashing(
 // MarkIncludedAttesterSlashing is used when an attester slashing has been included in a beacon block.
 // Every block seen by this node that contains proposer slashings should call this method to include
 // the proposer slashings.
-func (p *Pool) MarkIncludedAttesterSlashing(as *ethpb.AttesterSlashing) {
+func (p *Pool) MarkIncludedAttesterSlashing(as ethpb.AttSlashing) {
 	p.lock.Lock()
 	defer p.lock.Unlock()
-	slashedVal := slice.IntersectionUint64(as.Attestation_1.AttestingIndices, as.Attestation_2.AttestingIndices)
+	slashedVal := slice.IntersectionUint64(as.FirstAttestation().GetAttestingIndices(), as.SecondAttestation().GetAttestingIndices())
 	for _, val := range slashedVal {
 		i := sort.Search(len(p.pendingAttesterSlashing), func(i int) bool {
 			return uint64(p.pendingAttesterSlashing[i].validatorToSlash) >= val
@@ -261,6 +270,32 @@ func (p *Pool) MarkIncludedProposerSlashing(ps *ethpb.ProposerSlashing) {
 	numProposerSlashingsIncluded.Inc()
 }
 
+// ConvertToElectra converts all Phase0 attester slashings to Electra attester slashings.
+// This functionality is needed at the time of the Electra fork.
+func (p *Pool) ConvertToElectra() {
+	p.lock.Lock()
+	defer p.lock.Unlock()
+
+	for _, pas := range p.pendingAttesterSlashing {
+		if pas.attesterSlashing.Version() == version.Phase0 {
+			first := pas.attesterSlashing.FirstAttestation()
+			second := pas.attesterSlashing.SecondAttestation()
+			pas.attesterSlashing = &ethpb.AttesterSlashingElectra{
+				Attestation_1: &ethpb.IndexedAttestationElectra{
+					AttestingIndices: first.GetAttestingIndices(),
+					Data:             first.GetData(),
+					Signature:        first.GetSignature(),
+				},
+				Attestation_2: &ethpb.IndexedAttestationElectra{
+					AttestingIndices: second.GetAttestingIndices(),
+					Data:             second.GetData(),
+					Signature:        second.GetSignature(),
+				},
+			}
+		}
+	}
+}
+
 // this function checks a few items about a validator before proceeding with inserting
 // a proposer/attester slashing into the pool. First, it checks if the validator
 // has been recently included in the pool, then it checks if the validator is slashable.
@@ -282,7 +317,7 @@ func (p *Pool) validatorSlashingPreconditionCheck(
 		return false, err
 	}
 	// Checking if the validator is slashable.
-	if !helpers.IsSlashableValidatorUsingTrie(validator, time.CurrentEpoch(state)) {
+	if !helpers.IsSlashableValidatorUsingTrie(validator, coretime.CurrentEpoch(state)) {
 		return false, nil
 	}
 	return true, nil

@@ -2,21 +2,25 @@ package kv
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/pkg/errors"
 	"github.com/prysmaticlabs/prysm/v5/beacon-chain/db/filters"
+	"github.com/prysmaticlabs/prysm/v5/beacon-chain/state"
 	"github.com/prysmaticlabs/prysm/v5/config/params"
 	"github.com/prysmaticlabs/prysm/v5/consensus-types/blocks"
 	"github.com/prysmaticlabs/prysm/v5/consensus-types/interfaces"
 	"github.com/prysmaticlabs/prysm/v5/consensus-types/primitives"
 	"github.com/prysmaticlabs/prysm/v5/encoding/bytesutil"
 	ethpb "github.com/prysmaticlabs/prysm/v5/proto/prysm/v1alpha1"
+	"github.com/prysmaticlabs/prysm/v5/runtime/version"
 	"github.com/prysmaticlabs/prysm/v5/testing/assert"
 	"github.com/prysmaticlabs/prysm/v5/testing/require"
 	"github.com/prysmaticlabs/prysm/v5/testing/util"
+	bolt "go.etcd.io/bbolt"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -124,6 +128,27 @@ var blockTests = []struct {
 			return blocks.NewSignedBeaconBlock(b)
 		},
 	},
+	{
+		name: "electra",
+		newBlock: func(slot primitives.Slot, root []byte) (interfaces.ReadOnlySignedBeaconBlock, error) {
+			b := util.NewBeaconBlockElectra()
+			b.Block.Slot = slot
+			if root != nil {
+				b.Block.ParentRoot = root
+			}
+			return blocks.NewSignedBeaconBlock(b)
+		},
+	},
+	{
+		name: "electra blind",
+		newBlock: func(slot primitives.Slot, root []byte) (interfaces.ReadOnlySignedBeaconBlock, error) {
+			b := util.NewBlindedBeaconBlockElectra()
+			b.Message.Slot = slot
+			if root != nil {
+				b.Message.ParentRoot = root
+			}
+			return blocks.NewSignedBeaconBlock(b)
+		}},
 }
 
 func TestStore_SaveBlock_NoDuplicates(t *testing.T) {
@@ -180,7 +205,7 @@ func TestStore_BlocksCRUD(t *testing.T) {
 			retrievedBlock, err = db.Block(ctx, blockRoot)
 			require.NoError(t, err)
 			wanted := retrievedBlock
-			if _, err := retrievedBlock.PbBellatrixBlock(); err == nil {
+			if retrievedBlock.Version() >= version.Bellatrix {
 				wanted, err = retrievedBlock.ToBlinded()
 				require.NoError(t, err)
 			}
@@ -331,6 +356,189 @@ func TestStore_DeleteFinalizedBlock(t *testing.T) {
 	require.NoError(t, db.SaveFinalizedCheckpoint(ctx, cp))
 	require.ErrorIs(t, db.DeleteBlock(ctx, root), ErrDeleteJustifiedAndFinalized)
 }
+
+func TestStore_HistoricalDataBeforeSlot(t *testing.T) {
+	slotsPerEpoch := uint64(params.BeaconConfig().SlotsPerEpoch)
+	db := setupDB(t)
+	ctx := context.Background()
+
+	// Save genesis block root
+	require.NoError(t, db.SaveGenesisBlockRoot(ctx, genesisBlockRoot))
+
+	// Create and save blocks for 4 epochs
+	blks := makeBlocks(t, 0, slotsPerEpoch*4, genesisBlockRoot)
+	require.NoError(t, db.SaveBlocks(ctx, blks))
+
+	// Mark state validator migration as complete
+	err := db.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(migrationsBucket).Put(migrationStateValidatorsKey, migrationCompleted)
+	})
+	require.NoError(t, err)
+
+	migrated, err := db.isStateValidatorMigrationOver()
+	require.NoError(t, err)
+	require.Equal(t, true, migrated)
+
+	// Create state summaries and states for each block
+	ss := make([]*ethpb.StateSummary, len(blks))
+	states := make([]state.BeaconState, len(blks))
+
+	for i, blk := range blks {
+		slot := blk.Block().Slot()
+		r, err := blk.Block().HashTreeRoot()
+		require.NoError(t, err)
+
+		// Create and save state summary
+		ss[i] = &ethpb.StateSummary{
+			Slot: slot,
+			Root: r[:],
+		}
+
+		// Create and save state with validator entries
+		vals := make([]*ethpb.Validator, 2)
+		for j := range vals {
+			vals[j] = &ethpb.Validator{
+				PublicKey:             bytesutil.PadTo([]byte{byte(i*j + 1)}, 48),
+				WithdrawalCredentials: bytesutil.PadTo([]byte{byte(i*j + 2)}, 32),
+			}
+		}
+
+		st, err := util.NewBeaconState(func(state *ethpb.BeaconState) error {
+			state.Validators = vals
+			state.Slot = slot
+			return nil
+		})
+		require.NoError(t, err)
+		require.NoError(t, db.SaveState(ctx, st, r))
+		states[i] = st
+
+		// Verify validator entries are saved to db
+		valsActual, err := db.validatorEntries(ctx, r)
+		require.NoError(t, err)
+		for j, val := range valsActual {
+			require.DeepEqual(t, vals[j], val)
+		}
+	}
+	require.NoError(t, db.SaveStateSummaries(ctx, ss))
+
+	// Verify slot indices exist before deletion
+	err = db.db.View(func(tx *bolt.Tx) error {
+		blockSlotBkt := tx.Bucket(blockSlotIndicesBucket)
+		stateSlotBkt := tx.Bucket(stateSlotIndicesBucket)
+
+		for i := uint64(0); i < slotsPerEpoch; i++ {
+			slot := bytesutil.SlotToBytesBigEndian(primitives.Slot(i + 1))
+			assert.NotNil(t, blockSlotBkt.Get(slot), "Expected block slot index to exist")
+			assert.NotNil(t, stateSlotBkt.Get(slot), "Expected state slot index to exist", i)
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	// Delete data before slot at epoch 1
+	require.NoError(t, db.DeleteHistoricalDataBeforeSlot(ctx, primitives.Slot(slotsPerEpoch)))
+
+	// Verify blocks from epoch 0 are deleted
+	for i := uint64(0); i < slotsPerEpoch; i++ {
+		root, err := blks[i].Block().HashTreeRoot()
+		require.NoError(t, err)
+
+		// Check block is deleted
+		retrievedBlocks, err := db.BlocksBySlot(ctx, primitives.Slot(i))
+		require.NoError(t, err)
+		assert.Equal(t, 0, len(retrievedBlocks))
+
+		// Verify block does not exist
+		assert.Equal(t, false, db.HasBlock(ctx, root))
+
+		// Verify block parent root does not exist
+		err = db.db.View(func(tx *bolt.Tx) error {
+			require.Equal(t, 0, len(tx.Bucket(blockParentRootIndicesBucket).Get(root[:])))
+			return nil
+		})
+		require.NoError(t, err)
+
+		// Verify state is deleted
+		hasState := db.HasState(ctx, root)
+		assert.Equal(t, false, hasState)
+
+		// Verify state summary is deleted
+		hasSummary := db.HasStateSummary(ctx, root)
+		assert.Equal(t, false, hasSummary)
+
+		// Verify validator hashes for block roots are deleted
+		err = db.db.View(func(tx *bolt.Tx) error {
+			assert.Equal(t, 0, len(tx.Bucket(blockRootValidatorHashesBucket).Get(root[:])))
+			return nil
+		})
+		require.NoError(t, err)
+	}
+
+	// Verify slot indices are deleted
+	err = db.db.View(func(tx *bolt.Tx) error {
+		blockSlotBkt := tx.Bucket(blockSlotIndicesBucket)
+		stateSlotBkt := tx.Bucket(stateSlotIndicesBucket)
+
+		for i := uint64(0); i < slotsPerEpoch; i++ {
+			slot := bytesutil.SlotToBytesBigEndian(primitives.Slot(i + 1))
+			assert.Equal(t, 0, len(blockSlotBkt.Get(slot)), fmt.Sprintf("Expected block slot index to be deleted, slot: %d", slot))
+			assert.Equal(t, 0, len(stateSlotBkt.Get(slot)), fmt.Sprintf("Expected state slot index to be deleted, slot: %d", slot))
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	// Verify blocks from epochs 1-3 still exist
+	for i := slotsPerEpoch; i < slotsPerEpoch*4; i++ {
+		root, err := blks[i].Block().HashTreeRoot()
+		require.NoError(t, err)
+
+		// Verify block exists
+		assert.Equal(t, true, db.HasBlock(ctx, root))
+
+		// Verify remaining block parent root exists, except last slot since we store parent roots of each block.
+		if i < slotsPerEpoch*4-1 {
+			err = db.db.View(func(tx *bolt.Tx) error {
+				require.NotNil(t, tx.Bucket(blockParentRootIndicesBucket).Get(root[:]), fmt.Sprintf("Expected block parent index to be deleted, slot: %d", i))
+				return nil
+			})
+			require.NoError(t, err)
+		}
+
+		// Verify state exists
+		hasState := db.HasState(ctx, root)
+		assert.Equal(t, true, hasState)
+
+		// Verify state summary exists
+		hasSummary := db.HasStateSummary(ctx, root)
+		assert.Equal(t, true, hasSummary)
+
+		// Verify slot indices still exist
+		err = db.db.View(func(tx *bolt.Tx) error {
+			blockSlotBkt := tx.Bucket(blockSlotIndicesBucket)
+			stateSlotBkt := tx.Bucket(stateSlotIndicesBucket)
+
+			slot := bytesutil.SlotToBytesBigEndian(primitives.Slot(i + 1))
+			assert.NotNil(t, blockSlotBkt.Get(slot), "Expected block slot index to exist")
+			assert.NotNil(t, stateSlotBkt.Get(slot), "Expected state slot index to exist")
+			return nil
+		})
+		require.NoError(t, err)
+
+		// Verify validator entries still exist
+		valsActual, err := db.validatorEntries(ctx, root)
+		require.NoError(t, err)
+		assert.NotNil(t, valsActual)
+
+		// Verify remaining validator hashes for block roots exists
+		err = db.db.View(func(tx *bolt.Tx) error {
+			assert.NotNil(t, tx.Bucket(blockRootValidatorHashesBucket).Get(root[:]))
+			return nil
+		})
+		require.NoError(t, err)
+	}
+}
+
 func TestStore_GenesisBlock(t *testing.T) {
 	db := setupDB(t)
 	ctx := context.Background()
@@ -368,15 +576,7 @@ func TestStore_BlocksCRUD_NoCache(t *testing.T) {
 			require.NoError(t, err)
 
 			wanted := blk
-			if _, err := blk.PbBellatrixBlock(); err == nil {
-				wanted, err = blk.ToBlinded()
-				require.NoError(t, err)
-			}
-			if _, err := blk.PbCapellaBlock(); err == nil {
-				wanted, err = blk.ToBlinded()
-				require.NoError(t, err)
-			}
-			if _, err := blk.PbDenebBlock(); err == nil {
+			if blk.Version() >= version.Bellatrix {
 				wanted, err = blk.ToBlinded()
 				require.NoError(t, err)
 			}
@@ -595,15 +795,7 @@ func TestStore_SaveBlock_CanGetHighestAt(t *testing.T) {
 			b, err := db.Block(ctx, root)
 			require.NoError(t, err)
 			wanted := block1
-			if _, err := block1.PbBellatrixBlock(); err == nil {
-				wanted, err = wanted.ToBlinded()
-				require.NoError(t, err)
-			}
-			if _, err := block1.PbCapellaBlock(); err == nil {
-				wanted, err = wanted.ToBlinded()
-				require.NoError(t, err)
-			}
-			if _, err := block1.PbDenebBlock(); err == nil {
+			if block1.Version() >= version.Bellatrix {
 				wanted, err = wanted.ToBlinded()
 				require.NoError(t, err)
 			}
@@ -621,15 +813,7 @@ func TestStore_SaveBlock_CanGetHighestAt(t *testing.T) {
 			b, err = db.Block(ctx, root)
 			require.NoError(t, err)
 			wanted2 := block2
-			if _, err := block2.PbBellatrixBlock(); err == nil {
-				wanted2, err = block2.ToBlinded()
-				require.NoError(t, err)
-			}
-			if _, err := block2.PbCapellaBlock(); err == nil {
-				wanted2, err = block2.ToBlinded()
-				require.NoError(t, err)
-			}
-			if _, err := block2.PbDenebBlock(); err == nil {
+			if block2.Version() >= version.Bellatrix {
 				wanted2, err = block2.ToBlinded()
 				require.NoError(t, err)
 			}
@@ -647,15 +831,7 @@ func TestStore_SaveBlock_CanGetHighestAt(t *testing.T) {
 			b, err = db.Block(ctx, root)
 			require.NoError(t, err)
 			wanted = block3
-			if _, err := block3.PbBellatrixBlock(); err == nil {
-				wanted, err = wanted.ToBlinded()
-				require.NoError(t, err)
-			}
-			if _, err := block3.PbCapellaBlock(); err == nil {
-				wanted, err = wanted.ToBlinded()
-				require.NoError(t, err)
-			}
-			if _, err := block3.PbDenebBlock(); err == nil {
+			if block3.Version() >= version.Bellatrix {
 				wanted, err = wanted.ToBlinded()
 				require.NoError(t, err)
 			}
@@ -691,15 +867,7 @@ func TestStore_GenesisBlock_CanGetHighestAt(t *testing.T) {
 			b, err := db.Block(ctx, root)
 			require.NoError(t, err)
 			wanted := block1
-			if _, err := block1.PbBellatrixBlock(); err == nil {
-				wanted, err = block1.ToBlinded()
-				require.NoError(t, err)
-			}
-			if _, err := block1.PbCapellaBlock(); err == nil {
-				wanted, err = block1.ToBlinded()
-				require.NoError(t, err)
-			}
-			if _, err := block1.PbDenebBlock(); err == nil {
+			if block1.Version() >= version.Bellatrix {
 				wanted, err = block1.ToBlinded()
 				require.NoError(t, err)
 			}
@@ -716,15 +884,7 @@ func TestStore_GenesisBlock_CanGetHighestAt(t *testing.T) {
 			b, err = db.Block(ctx, root)
 			require.NoError(t, err)
 			wanted = genesisBlock
-			if _, err := genesisBlock.PbBellatrixBlock(); err == nil {
-				wanted, err = genesisBlock.ToBlinded()
-				require.NoError(t, err)
-			}
-			if _, err := genesisBlock.PbCapellaBlock(); err == nil {
-				wanted, err = genesisBlock.ToBlinded()
-				require.NoError(t, err)
-			}
-			if _, err := genesisBlock.PbDenebBlock(); err == nil {
+			if genesisBlock.Version() >= version.Bellatrix {
 				wanted, err = genesisBlock.ToBlinded()
 				require.NoError(t, err)
 			}
@@ -741,15 +901,7 @@ func TestStore_GenesisBlock_CanGetHighestAt(t *testing.T) {
 			b, err = db.Block(ctx, root)
 			require.NoError(t, err)
 			wanted = genesisBlock
-			if _, err := genesisBlock.PbBellatrixBlock(); err == nil {
-				wanted, err = genesisBlock.ToBlinded()
-				require.NoError(t, err)
-			}
-			if _, err := genesisBlock.PbCapellaBlock(); err == nil {
-				wanted, err = genesisBlock.ToBlinded()
-				require.NoError(t, err)
-			}
-			if _, err := genesisBlock.PbDenebBlock(); err == nil {
+			if genesisBlock.Version() >= version.Bellatrix {
 				wanted, err = genesisBlock.ToBlinded()
 				require.NoError(t, err)
 			}
@@ -845,15 +997,7 @@ func TestStore_BlocksBySlot_BlockRootsBySlot(t *testing.T) {
 			require.NoError(t, err)
 
 			wanted := b1
-			if _, err := b1.PbBellatrixBlock(); err == nil {
-				wanted, err = b1.ToBlinded()
-				require.NoError(t, err)
-			}
-			if _, err := b1.PbCapellaBlock(); err == nil {
-				wanted, err = b1.ToBlinded()
-				require.NoError(t, err)
-			}
-			if _, err := b1.PbDenebBlock(); err == nil {
+			if b1.Version() >= version.Bellatrix {
 				wanted, err = b1.ToBlinded()
 				require.NoError(t, err)
 			}
@@ -869,15 +1013,7 @@ func TestStore_BlocksBySlot_BlockRootsBySlot(t *testing.T) {
 				t.Fatalf("Expected 2 blocks, received %d blocks", len(retrievedBlocks))
 			}
 			wanted = b2
-			if _, err := b2.PbBellatrixBlock(); err == nil {
-				wanted, err = b2.ToBlinded()
-				require.NoError(t, err)
-			}
-			if _, err := b2.PbCapellaBlock(); err == nil {
-				wanted, err = b2.ToBlinded()
-				require.NoError(t, err)
-			}
-			if _, err := b2.PbDenebBlock(); err == nil {
+			if b2.Version() >= version.Bellatrix {
 				wanted, err = b2.ToBlinded()
 				require.NoError(t, err)
 			}
@@ -887,15 +1023,7 @@ func TestStore_BlocksBySlot_BlockRootsBySlot(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, true, proto.Equal(wantedPb, retrieved0Pb), "Wanted: %v, received: %v", retrievedBlocks[0], wanted)
 			wanted = b3
-			if _, err := b3.PbBellatrixBlock(); err == nil {
-				wanted, err = b3.ToBlinded()
-				require.NoError(t, err)
-			}
-			if _, err := b3.PbCapellaBlock(); err == nil {
-				wanted, err = b3.ToBlinded()
-				require.NoError(t, err)
-			}
-			if _, err := b3.PbDenebBlock(); err == nil {
+			if b3.Version() >= version.Bellatrix {
 				wanted, err = b3.ToBlinded()
 				require.NoError(t, err)
 			}

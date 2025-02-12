@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/prysmaticlabs/prysm/v5/beacon-chain/state"
+	consensus_blocks "github.com/prysmaticlabs/prysm/v5/consensus-types/blocks"
 	"github.com/prysmaticlabs/prysm/v5/consensus-types/forkchoice"
 	"github.com/prysmaticlabs/prysm/v5/consensus-types/primitives"
 )
@@ -20,13 +21,6 @@ func (s *Service) GetProposerHead() [32]byte {
 	s.cfg.ForkChoiceStore.RLock()
 	defer s.cfg.ForkChoiceStore.RUnlock()
 	return s.cfg.ForkChoiceStore.GetProposerHead()
-}
-
-// ShouldOverrideFCU returns the corresponding value from forkchoice
-func (s *Service) ShouldOverrideFCU() bool {
-	s.cfg.ForkChoiceStore.RLock()
-	defer s.cfg.ForkChoiceStore.RUnlock()
-	return s.cfg.ForkChoiceStore.ShouldOverrideFCU()
 }
 
 // SetForkChoiceGenesisTime sets the genesis time in Forkchoice
@@ -51,10 +45,10 @@ func (s *Service) ReceivedBlocksLastEpoch() (uint64, error) {
 }
 
 // InsertNode is a wrapper for node insertion which is self locked
-func (s *Service) InsertNode(ctx context.Context, st state.BeaconState, root [32]byte) error {
+func (s *Service) InsertNode(ctx context.Context, st state.BeaconState, block consensus_blocks.ROBlock) error {
 	s.cfg.ForkChoiceStore.Lock()
 	defer s.cfg.ForkChoiceStore.Unlock()
-	return s.cfg.ForkChoiceStore.InsertNode(ctx, st, root)
+	return s.cfg.ForkChoiceStore.InsertNode(ctx, st, block)
 }
 
 // ForkChoiceDump returns the corresponding value from forkchoice
@@ -98,4 +92,11 @@ func (s *Service) FinalizedBlockHash() [32]byte {
 	s.cfg.ForkChoiceStore.RLock()
 	defer s.cfg.ForkChoiceStore.RUnlock()
 	return s.cfg.ForkChoiceStore.FinalizedPayloadBlockHash()
+}
+
+// ParentRoot wraps a call to the corresponding method in forkchoice
+func (s *Service) ParentRoot(root [32]byte) ([32]byte, error) {
+	s.cfg.ForkChoiceStore.RLock()
+	defer s.cfg.ForkChoiceStore.RUnlock()
+	return s.cfg.ForkChoiceStore.ParentRoot(root)
 }

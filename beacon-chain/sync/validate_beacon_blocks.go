@@ -16,18 +16,17 @@ import (
 	"github.com/prysmaticlabs/prysm/v5/beacon-chain/core/transition"
 	"github.com/prysmaticlabs/prysm/v5/beacon-chain/state"
 	"github.com/prysmaticlabs/prysm/v5/config/features"
-	fieldparams "github.com/prysmaticlabs/prysm/v5/config/fieldparams"
 	"github.com/prysmaticlabs/prysm/v5/config/params"
 	consensusblocks "github.com/prysmaticlabs/prysm/v5/consensus-types/blocks"
 	"github.com/prysmaticlabs/prysm/v5/consensus-types/interfaces"
 	"github.com/prysmaticlabs/prysm/v5/consensus-types/primitives"
 	"github.com/prysmaticlabs/prysm/v5/encoding/bytesutil"
 	"github.com/prysmaticlabs/prysm/v5/monitoring/tracing"
+	"github.com/prysmaticlabs/prysm/v5/monitoring/tracing/trace"
 	"github.com/prysmaticlabs/prysm/v5/runtime/version"
 	prysmTime "github.com/prysmaticlabs/prysm/v5/time"
 	"github.com/prysmaticlabs/prysm/v5/time/slots"
 	"github.com/sirupsen/logrus"
-	"go.opencensus.io/trace"
 )
 
 var (
@@ -201,7 +200,7 @@ func (s *Service) validateBeaconBlockPubSub(ctx context.Context, pid peer.ID, ms
 	}
 
 	// Record attribute of valid block.
-	span.AddAttributes(trace.Int64Attribute("slotInEpoch", int64(blk.Block().Slot()%params.BeaconConfig().SlotsPerEpoch)))
+	span.SetAttributes(trace.Int64Attribute("slotInEpoch", int64(blk.Block().Slot()%params.BeaconConfig().SlotsPerEpoch)))
 	blkPb, err := blk.Proto()
 	if err != nil {
 		log.WithError(err).WithFields(getBlockFields(blk)).Debug("Could not convert beacon block to protobuf type")
@@ -303,8 +302,10 @@ func validateDenebBeaconBlock(blk interfaces.ReadOnlyBeaconBlock) error {
 	}
 	// [REJECT] The length of KZG commitments is less than or equal to the limitation defined in Consensus Layer
 	// -- i.e. validate that len(body.signed_beacon_block.message.blob_kzg_commitments) <= MAX_BLOBS_PER_BLOCK
-	if len(commits) > fieldparams.MaxBlobsPerBlock {
-		return errors.Wrapf(errRejectCommitmentLen, "%d > %d", len(commits), fieldparams.MaxBlobsPerBlock)
+
+	maxBlobsPerBlock := params.BeaconConfig().MaxBlobsPerBlock(blk.Slot())
+	if len(commits) > maxBlobsPerBlock {
+		return errors.Wrapf(errRejectCommitmentLen, "%d > %d", len(commits), maxBlobsPerBlock)
 	}
 	return nil
 }
@@ -345,7 +346,7 @@ func (s *Service) validateBellatrixBeaconBlock(ctx context.Context, parentState 
 	if err != nil {
 		return err
 	}
-	if payload.IsNil() {
+	if payload == nil || payload.IsNil() {
 		return errors.New("execution payload is nil")
 	}
 	if payload.Timestamp() != uint64(t.Unix()) {
@@ -369,7 +370,7 @@ func (s *Service) verifyPendingBlockSignature(ctx context.Context, blk interface
 		return pubsub.ValidationIgnore, err
 	}
 	// Ignore block in the event of non-existent proposer.
-	_, err = roState.ValidatorAtIndex(blk.Block().ProposerIndex())
+	_, err = roState.ValidatorAtIndexReadOnly(blk.Block().ProposerIndex())
 	if err != nil {
 		return pubsub.ValidationIgnore, err
 	}

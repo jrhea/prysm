@@ -4,17 +4,16 @@ import (
 	"fmt"
 
 	"github.com/ethereum/go-ethereum/common"
-	fastssz "github.com/prysmaticlabs/fastssz"
 	"github.com/prysmaticlabs/prysm/v5/cmd"
 	"github.com/prysmaticlabs/prysm/v5/cmd/beacon-chain/flags"
 	"github.com/prysmaticlabs/prysm/v5/config/params"
 	"github.com/prysmaticlabs/prysm/v5/consensus-types/primitives"
-	tracing2 "github.com/prysmaticlabs/prysm/v5/monitoring/tracing"
+	"github.com/prysmaticlabs/prysm/v5/monitoring/tracing"
 	"github.com/urfave/cli/v2"
 )
 
 func configureTracing(cliCtx *cli.Context) error {
-	return tracing2.Setup(
+	return tracing.Setup(
 		"beacon-chain", // service name
 		cliCtx.String(cmd.TracingProcessNameFlag.Name),
 		cliCtx.String(cmd.TracingEndpointFlag.Name),
@@ -74,6 +73,21 @@ func configureBuilderCircuitBreaker(cliCtx *cli.Context) error {
 			return err
 		}
 	}
+	if cliCtx.IsSet(flags.MinBuilderBid.Name) {
+		c := params.BeaconConfig().Copy()
+		c.MinBuilderBid = cliCtx.Uint64(flags.MinBuilderBid.Name)
+		if err := params.SetActive(c); err != nil {
+			return err
+		}
+	}
+	if cliCtx.IsSet(flags.MinBuilderDiff.Name) {
+		c := params.BeaconConfig().Copy()
+		c.MinBuilderDiff = cliCtx.Uint64(flags.MinBuilderDiff.Name)
+		if err := params.SetActive(c); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -118,7 +132,7 @@ func configureEth1Config(cliCtx *cli.Context) error {
 }
 
 func configureNetwork(cliCtx *cli.Context) {
-	if len(cliCtx.StringSlice(cmd.BootstrapNode.Name)) > 0 {
+	if cliCtx.IsSet(cmd.BootstrapNode.Name) {
 		c := params.BeaconNetworkConfig()
 		c.BootstrapNodes = cliCtx.StringSlice(cmd.BootstrapNode.Name)
 		params.OverrideBeaconNetworkConfig(c)
@@ -128,23 +142,6 @@ func configureNetwork(cliCtx *cli.Context) {
 		networkCfg.ContractDeploymentBlock = uint64(cliCtx.Int(flags.ContractDeploymentBlock.Name))
 		params.OverrideBeaconNetworkConfig(networkCfg)
 	}
-}
-
-func configureInteropConfig(cliCtx *cli.Context) error {
-	// an explicit chain config was specified, don't mess with it
-	if cliCtx.IsSet(cmd.ChainConfigFileFlag.Name) {
-		return nil
-	}
-	genTimeIsSet := cliCtx.IsSet(flags.InteropGenesisTimeFlag.Name)
-	numValsIsSet := cliCtx.IsSet(flags.InteropNumValidatorsFlag.Name)
-	votesIsSet := cliCtx.IsSet(flags.InteropMockEth1DataVotesFlag.Name)
-
-	if genTimeIsSet || numValsIsSet || votesIsSet {
-		if err := params.SetActive(params.InteropConfig().Copy()); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func configureExecutionSetting(cliCtx *cli.Context) error {
@@ -196,8 +193,4 @@ func configureExecutionSetting(cliCtx *cli.Context) error {
 	log.Infof("Default fee recipient is set to %s, recipient may be overwritten from validator client and persist in db."+
 		" Default fee recipient will be used as a fall back", checksumAddress.Hex())
 	return params.SetActive(c)
-}
-
-func configureFastSSZHashingAlgorithm() {
-	fastssz.EnableVectorizedHTR = true
 }

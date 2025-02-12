@@ -11,6 +11,7 @@ import (
 	"github.com/prysmaticlabs/prysm/v5/beacon-chain/core/helpers"
 	"github.com/prysmaticlabs/prysm/v5/beacon-chain/forkchoice"
 	"github.com/prysmaticlabs/prysm/v5/beacon-chain/state"
+	"github.com/prysmaticlabs/prysm/v5/config/features"
 	fieldparams "github.com/prysmaticlabs/prysm/v5/config/fieldparams"
 	"github.com/prysmaticlabs/prysm/v5/config/params"
 	"github.com/prysmaticlabs/prysm/v5/consensus-types/blocks"
@@ -18,11 +19,11 @@ import (
 	"github.com/prysmaticlabs/prysm/v5/consensus-types/primitives"
 	"github.com/prysmaticlabs/prysm/v5/encoding/bytesutil"
 	"github.com/prysmaticlabs/prysm/v5/math"
+	"github.com/prysmaticlabs/prysm/v5/monitoring/tracing/trace"
 	ethpbv1 "github.com/prysmaticlabs/prysm/v5/proto/eth/v1"
 	"github.com/prysmaticlabs/prysm/v5/runtime/version"
 	"github.com/prysmaticlabs/prysm/v5/time/slots"
 	"github.com/sirupsen/logrus"
-	"go.opencensus.io/trace"
 )
 
 // UpdateAndSaveHeadWithBalances updates the beacon state head after getting justified balanced from cache.
@@ -401,16 +402,22 @@ func (s *Service) saveOrphanedOperations(ctx context.Context, orphanedRoot [32]b
 		}
 		for _, a := range orphanedBlk.Block().Body().Attestations() {
 			// if the attestation is one epoch older, it wouldn't been useful to save it.
-			if a.Data.Slot+params.BeaconConfig().SlotsPerEpoch < s.CurrentSlot() {
+			if a.GetData().Slot+params.BeaconConfig().SlotsPerEpoch < s.CurrentSlot() {
 				continue
 			}
-			if helpers.IsAggregated(a) {
-				if err := s.cfg.AttPool.SaveAggregatedAttestation(a); err != nil {
+			if features.Get().EnableExperimentalAttestationPool {
+				if err = s.cfg.AttestationCache.Add(a); err != nil {
 					return err
 				}
 			} else {
-				if err := s.cfg.AttPool.SaveUnaggregatedAttestation(a); err != nil {
-					return err
+				if a.IsAggregated() {
+					if err = s.cfg.AttPool.SaveAggregatedAttestation(a); err != nil {
+						return err
+					}
+				} else {
+					if err = s.cfg.AttPool.SaveUnaggregatedAttestation(a); err != nil {
+						return err
+					}
 				}
 			}
 			saveOrphanedAttCount.Inc()

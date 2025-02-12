@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	runtimeDebug "runtime/debug"
+	"time"
 
 	joonix "github.com/joonix/log"
 	"github.com/pkg/errors"
@@ -50,7 +51,6 @@ func startNode(ctx *cli.Context) error {
 
 var appFlags = []cli.Flag{
 	flags.BeaconRPCProviderFlag,
-	flags.BeaconRPCGatewayProviderFlag,
 	flags.BeaconRESTApiProviderFlag,
 	flags.CertFlag,
 	flags.GraffitiFlag,
@@ -60,12 +60,12 @@ var appFlags = []cli.Flag{
 	flags.EnableRPCFlag,
 	flags.RPCHost,
 	flags.RPCPort,
-	flags.GRPCGatewayPort,
-	flags.GRPCGatewayHost,
-	flags.GrpcRetriesFlag,
-	flags.GrpcRetryDelayFlag,
-	flags.GrpcHeadersFlag,
-	flags.GPRCGatewayCorsDomain,
+	flags.HTTPServerPort,
+	flags.HTTPServerHost,
+	flags.GRPCRetriesFlag,
+	flags.GRPCRetryDelayFlag,
+	flags.GRPCHeadersFlag,
+	flags.HTTPServerCorsDomain,
 	flags.DisableAccountMetricsFlag,
 	flags.MonitoringPortFlag,
 	flags.SlasherRPCProviderFlag,
@@ -75,9 +75,11 @@ var appFlags = []cli.Flag{
 	flags.EnableWebFlag,
 	flags.GraffitiFileFlag,
 	flags.EnableDistributed,
+	flags.AuthTokenPathFlag,
 	// Consensys' Web3Signer flags
 	flags.Web3SignerURLFlag,
 	flags.Web3SignerPublicValidatorKeysFlag,
+	flags.Web3SignerKeyFileFlag,
 	flags.SuggestedFeeRecipientFlag,
 	flags.ProposerSettingsURLFlag,
 	flags.ProposerSettingsFlag,
@@ -152,7 +154,7 @@ func main() {
 			switch format {
 			case "text":
 				formatter := new(prefixed.TextFormatter)
-				formatter.TimestampFormat = "2006-01-02 15:04:05"
+				formatter.TimestampFormat = time.DateTime
 				formatter.FullTimestamp = true
 				// If persistent log files are written - we disable the log messages coloring because
 				// the colors are ANSI codes and seen as gibberish in the log files.
@@ -189,6 +191,10 @@ func main() {
 
 			if err := debug.Setup(ctx); err != nil {
 				return errors.Wrap(err, "failed to setup debug")
+			}
+
+			if err := features.ValidateNetworkFlags(ctx); err != nil {
+				return errors.Wrap(err, "provided multiple network flags")
 			}
 
 			return cmd.ValidateNoArgs(ctx)

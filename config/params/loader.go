@@ -53,7 +53,8 @@ func UnmarshalConfig(yamlFile []byte, conf *BeaconChainConfig) (*BeaconChainConf
 	}
 	yamlFile = []byte(strings.Join(lines, "\n"))
 	if err := yaml.UnmarshalStrict(yamlFile, conf); err != nil {
-		if _, ok := err.(*yaml.TypeError); !ok {
+		var typeError *yaml.TypeError
+		if !errors.As(err, &typeError) {
 			return nil, errors.Wrap(err, "Failed to parse chain config yaml file.")
 		} else {
 			log.WithError(err).Error("There were some issues parsing the config from a yaml file")
@@ -64,6 +65,8 @@ func UnmarshalConfig(yamlFile []byte, conf *BeaconChainConfig) (*BeaconChainConf
 	}
 	// recompute SqrRootSlotsPerEpoch constant to handle non-standard values of SlotsPerEpoch
 	conf.SqrRootSlotsPerEpoch = primitives.Slot(math.IntegerSquareRoot(uint64(conf.SlotsPerEpoch)))
+	// Recompute the fork schedule
+	conf.InitializeForkSchedule()
 	log.Debugf("Config file values: %+v", conf)
 	return conf, nil
 }
@@ -214,6 +217,10 @@ func ConfigToYaml(cfg *BeaconChainConfig) []byte {
 		fmt.Sprintf("BLOB_SIDECAR_SUBNET_COUNT: %d", cfg.BlobsidecarSubnetCount),
 		fmt.Sprintf("DENEB_FORK_EPOCH: %d", cfg.DenebForkEpoch),
 		fmt.Sprintf("DENEB_FORK_VERSION: %#x", cfg.DenebForkVersion),
+		fmt.Sprintf("ELECTRA_FORK_EPOCH: %d", cfg.ElectraForkEpoch),
+		fmt.Sprintf("ELECTRA_FORK_VERSION: %#x", cfg.ElectraForkVersion),
+		fmt.Sprintf("FULU_FORK_EPOCH: %d", cfg.FuluForkEpoch),
+		fmt.Sprintf("FULU_FORK_VERSION: %#x", cfg.FuluForkVersion),
 		fmt.Sprintf("EPOCHS_PER_SUBNET_SUBSCRIPTION: %d", cfg.EpochsPerSubnetSubscription),
 		fmt.Sprintf("ATTESTATION_SUBNET_EXTRA_BITS: %d", cfg.AttestationSubnetExtraBits),
 		fmt.Sprintf("ATTESTATION_SUBNET_PREFIX_BITS: %d", cfg.AttestationSubnetPrefixBits),

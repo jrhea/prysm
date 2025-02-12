@@ -62,7 +62,31 @@ func (s *Service) roundRobinSync(genesis time.Time) error {
 	return s.syncToNonFinalizedEpoch(ctx, genesis)
 }
 
-// syncToFinalizedEpoch sync from head to best known finalized epoch.
+func (s *Service) startBlocksQueue(ctx context.Context, highestSlot primitives.Slot, mode syncMode) (*blocksQueue, error) {
+	vr := s.clock.GenesisValidatorsRoot()
+	ctxMap, err := sync.ContextByteVersionsForValRoot(vr)
+	if err != nil {
+		return nil, errors.Wrapf(err, "unable to initialize context version map using genesis validator root = %#x", vr)
+	}
+
+	cfg := &blocksQueueConfig{
+		p2p:                 s.cfg.P2P,
+		db:                  s.cfg.DB,
+		chain:               s.cfg.Chain,
+		clock:               s.clock,
+		ctxMap:              ctxMap,
+		highestExpectedSlot: highestSlot,
+		mode:                mode,
+		bs:                  s.cfg.BlobStorage,
+	}
+	queue := newBlocksQueue(ctx, cfg)
+	if err := queue.start(); err != nil {
+		return nil, err
+	}
+	return queue, nil
+}
+
+// syncToFinalizedEpoch sync from head to the best known finalized epoch.
 func (s *Service) syncToFinalizedEpoch(ctx context.Context, genesis time.Time) error {
 	highestFinalizedSlot, err := slots.EpochStart(s.highestFinalizedEpoch())
 	if err != nil {
@@ -74,28 +98,12 @@ func (s *Service) syncToFinalizedEpoch(ctx context.Context, genesis time.Time) e
 		return nil
 	}
 
-	vr := s.clock.GenesisValidatorsRoot()
-	ctxMap, err := sync.ContextByteVersionsForValRoot(vr)
+	queue, err := s.startBlocksQueue(ctx, highestFinalizedSlot, modeStopOnFinalizedEpoch)
 	if err != nil {
-		return errors.Wrapf(err, "unable to initialize context version map using genesis validator root = %#x", vr)
-	}
-	queue := newBlocksQueue(ctx, &blocksQueueConfig{
-		p2p:                 s.cfg.P2P,
-		db:                  s.cfg.DB,
-		chain:               s.cfg.Chain,
-		clock:               s.clock,
-		ctxMap:              ctxMap,
-		highestExpectedSlot: highestFinalizedSlot,
-		mode:                modeStopOnFinalizedEpoch,
-	})
-	if err := queue.start(); err != nil {
 		return err
 	}
 
 	for data := range queue.fetchedData {
-		// If blobs are available. Verify blobs and blocks are consistence.
-		// We can't import a block if there's no associated blob within DA bound.
-		// The blob has to pass aggregated proof check.
 		s.processFetchedData(ctx, genesis, s.cfg.Chain.HeadSlot(), data)
 	}
 
@@ -113,21 +121,8 @@ func (s *Service) syncToFinalizedEpoch(ctx context.Context, genesis time.Time) e
 // syncToNonFinalizedEpoch sync from head to best known non-finalized epoch supported by majority
 // of peers (no less than MinimumSyncPeers*2 peers).
 func (s *Service) syncToNonFinalizedEpoch(ctx context.Context, genesis time.Time) error {
-	vr := s.clock.GenesisValidatorsRoot()
-	ctxMap, err := sync.ContextByteVersionsForValRoot(vr)
+	queue, err := s.startBlocksQueue(ctx, slots.Since(genesis), modeNonConstrained)
 	if err != nil {
-		return errors.Wrapf(err, "unable to initialize context version map using genesis validator root = %#x", vr)
-	}
-	queue := newBlocksQueue(ctx, &blocksQueueConfig{
-		p2p:                 s.cfg.P2P,
-		db:                  s.cfg.DB,
-		chain:               s.cfg.Chain,
-		clock:               s.clock,
-		ctxMap:              ctxMap,
-		highestExpectedSlot: slots.Since(genesis),
-		mode:                modeNonConstrained,
-	})
-	if err := queue.start(); err != nil {
 		return err
 	}
 	for data := range queue.fetchedData {
@@ -168,7 +163,7 @@ func (s *Service) processFetchedDataRegSync(
 	if len(bwb) == 0 {
 		return
 	}
-	bv := verification.NewBlobBatchVerifier(s.newBlobVerifier, verification.InitsyncSidecarRequirements)
+	bv := verification.NewBlobBatchVerifier(s.newBlobVerifier, verification.InitsyncBlobSidecarRequirements)
 	avs := das.NewLazilyPersistentStore(s.cfg.BlobStorage, bv)
 	batchFields := logrus.Fields{
 		"firstSlot":        data.bwb[0].Block.Block().Slot(),
@@ -327,7 +322,7 @@ func (s *Service) processBatchedBlocks(ctx context.Context, genesis time.Time,
 			errParentDoesNotExist, first.Block().ParentRoot(), first.Block().Slot())
 	}
 
-	bv := verification.NewBlobBatchVerifier(s.newBlobVerifier, verification.InitsyncSidecarRequirements)
+	bv := verification.NewBlobBatchVerifier(s.newBlobVerifier, verification.InitsyncBlobSidecarRequirements)
 	avs := das.NewLazilyPersistentStore(s.cfg.BlobStorage, bv)
 	s.logBatchSyncStatus(genesis, first, len(bwb))
 	for _, bb := range bwb {

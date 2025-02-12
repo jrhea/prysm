@@ -4,17 +4,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
-	"github.com/gorilla/mux"
-	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
+	"github.com/prysmaticlabs/prysm/v5/cmd/validator/flags"
 	fieldparams "github.com/prysmaticlabs/prysm/v5/config/fieldparams"
 	"github.com/prysmaticlabs/prysm/v5/config/params"
 	"github.com/prysmaticlabs/prysm/v5/config/proposer"
@@ -40,8 +42,8 @@ import (
 	remoteweb3signer "github.com/prysmaticlabs/prysm/v5/validator/keymanager/remote-web3signer"
 	"github.com/prysmaticlabs/prysm/v5/validator/slashing-protection-history/format"
 	mocks "github.com/prysmaticlabs/prysm/v5/validator/testing"
+	"github.com/urfave/cli/v2"
 	"go.uber.org/mock/gomock"
-	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -116,6 +118,16 @@ func TestServer_ListKeystores(t *testing.T) {
 				resp.Data[i].DerivationPath,
 			)
 		}
+	})
+	t.Run("calling list remote while using a local wallet returns empty", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/eth/v1/remotekeys"), nil)
+		wr := httptest.NewRecorder()
+		wr.Body = &bytes.Buffer{}
+		s.ListRemoteKeys(wr, req)
+		require.Equal(t, http.StatusOK, wr.Code)
+		resp := &ListRemoteKeysResponse{}
+		require.NoError(t, json.Unmarshal(wr.Body.Bytes(), resp))
+		require.Equal(t, 0, len(resp.Data))
 	})
 }
 
@@ -289,7 +301,7 @@ func TestServer_ImportKeystores(t *testing.T) {
 				})
 			}
 			require.NoError(t, err)
-			s.valDB = validatorDB
+			s.db = validatorDB
 
 			// Have to close it after import is done otherwise it complains db is not open.
 			defer func() {
@@ -342,13 +354,18 @@ func TestServer_ImportKeystores(t *testing.T) {
 
 func TestServer_ImportKeystores_WrongKeymanagerKind(t *testing.T) {
 	ctx := context.Background()
-	w := wallet.NewWalletForWeb3Signer()
+	app := cli.App{}
+	set := flag.NewFlagSet("test", 0)
+	newDir := filepath.Join(t.TempDir(), "new")
+	require.NoError(t, os.MkdirAll(newDir, 0700))
+	set.String(flags.WalletDirFlag.Name, newDir, "")
+	w := wallet.NewWalletForWeb3Signer(cli.NewContext(&app, set, nil))
 	root := make([]byte, fieldparams.RootLength)
 	root[0] = 1
 	km, err := w.InitializeKeymanager(ctx, iface.InitKeymanagerConfig{ListenForChanges: false, Web3SignerConfig: &remoteweb3signer.SetupConfig{
 		BaseEndpoint:          "http://example.com",
 		GenesisValidatorsRoot: root,
-		PublicKeysURL:         "http://example.com/public_keys",
+		ProvidedPublicKeys:    []string{"0xa2b5aaad9c6efefe7bb9b1243a043404f3362937cfb6b31833929833173f476630ea2cfeb0d9ddf15f97ca8685948820"},
 	}})
 	require.NoError(t, err)
 	vs, err := client.NewValidatorService(ctx, &client.Config{
@@ -413,7 +430,7 @@ func TestServer_DeleteKeystores(t *testing.T) {
 			})
 		}
 		require.NoError(t, err)
-		srv.valDB = validatorDB
+		srv.db = validatorDB
 
 		// Have to close it after import is done otherwise it complains db is not open.
 		defer func() {
@@ -589,7 +606,7 @@ func TestServer_DeleteKeystores_FailedSlashingProtectionExport(t *testing.T) {
 			require.NoError(t, err)
 			err = validatorDB.SaveGenesisValidatorsRoot(ctx, make([]byte, fieldparams.RootLength))
 			require.NoError(t, err)
-			srv.valDB = validatorDB
+			srv.db = validatorDB
 
 			// Have to close it after import is done otherwise it complains db is not open.
 			defer func() {
@@ -620,14 +637,19 @@ func TestServer_DeleteKeystores_FailedSlashingProtectionExport(t *testing.T) {
 
 func TestServer_DeleteKeystores_WrongKeymanagerKind(t *testing.T) {
 	ctx := context.Background()
-	w := wallet.NewWalletForWeb3Signer()
+	app := cli.App{}
+	set := flag.NewFlagSet("test", 0)
+	newDir := filepath.Join(t.TempDir(), "new")
+	require.NoError(t, os.MkdirAll(newDir, 0700))
+	set.String(flags.WalletDirFlag.Name, newDir, "")
+	w := wallet.NewWalletForWeb3Signer(cli.NewContext(&app, set, nil))
 	root := make([]byte, fieldparams.RootLength)
 	root[0] = 1
 	km, err := w.InitializeKeymanager(ctx, iface.InitKeymanagerConfig{ListenForChanges: false,
 		Web3SignerConfig: &remoteweb3signer.SetupConfig{
 			BaseEndpoint:          "http://example.com",
 			GenesisValidatorsRoot: root,
-			PublicKeysURL:         "http://example.com/public_keys",
+			ProvidedPublicKeys:    []string{"0xa2b5aaad9c6efefe7bb9b1243a043404f3362937cfb6b31833929833173f476630ea2cfeb0d9ddf15f97ca8685948820"},
 		}})
 	require.NoError(t, err)
 	vs, err := client.NewValidatorService(ctx, &client.Config{
@@ -692,7 +714,7 @@ func TestServer_SetVoluntaryExit(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	ctx := grpc.NewContextWithServerTransportStream(context.Background(), &runtime.ServerTransportStream{})
+	ctx := context.Background()
 	defaultWalletPath = setupWalletDir(t)
 	opts := []accounts.Option{
 		accounts.WithWalletDir(defaultWalletPath),
@@ -738,7 +760,7 @@ func TestServer_SetVoluntaryExit(t *testing.T) {
 		Return(&eth.DomainResponse{SignatureDomain: make([]byte, common.HashLength)}, nil /*err*/)
 
 	mockNodeClient.EXPECT().
-		GetGenesis(gomock.Any(), gomock.Any()).
+		Genesis(gomock.Any(), gomock.Any()).
 		Times(3).
 		Return(&eth.Genesis{GenesisTime: genesisTime}, nil)
 
@@ -746,7 +768,7 @@ func TestServer_SetVoluntaryExit(t *testing.T) {
 		validatorService:          vs,
 		beaconNodeValidatorClient: beaconClient,
 		wallet:                    w,
-		beaconNodeClient:          mockNodeClient,
+		nodeClient:                mockNodeClient,
 		walletInitialized:         w != nil,
 	}
 
@@ -826,7 +848,7 @@ func TestServer_SetVoluntaryExit(t *testing.T) {
 				require.NoError(t, tt.mockSetup(s))
 			}
 			req := httptest.NewRequest("POST", fmt.Sprintf("/eth/v1/validator/{pubkey}/voluntary_exit?epoch=%s", tt.epoch), nil)
-			req = mux.SetURLVars(req, map[string]string{"pubkey": tt.pubkey})
+			req.SetPathValue("pubkey", tt.pubkey)
 			w := httptest.NewRecorder()
 			w.Body = &bytes.Buffer{}
 
@@ -841,12 +863,12 @@ func TestServer_SetVoluntaryExit(t *testing.T) {
 			resp := &SetVoluntaryExitResponse{}
 			require.NoError(t, json.Unmarshal(w.Body.Bytes(), resp))
 			if tt.w.epoch == 0 {
-				genesisResponse, err := s.beaconNodeClient.GetGenesis(ctx, &emptypb.Empty{})
+				genesisResponse, err := s.nodeClient.Genesis(ctx, &emptypb.Empty{})
 				require.NoError(t, err)
 				tt.w.epoch, err = client.CurrentEpoch(genesisResponse.GenesisTime)
 				require.NoError(t, err)
 				req2 := httptest.NewRequest("POST", fmt.Sprintf("/eth/v1/validator/{pubkey}/voluntary_exit?epoch=%s", tt.epoch), nil)
-				req2 = mux.SetURLVars(req2, map[string]string{"pubkey": hexutil.Encode(pubKeys[0][:])})
+				req2.SetPathValue("pubkey", hexutil.Encode(pubKeys[0][:]))
 				w2 := httptest.NewRecorder()
 				w2.Body = &bytes.Buffer{}
 				s.SetVoluntaryExit(w2, req2)
@@ -939,7 +961,7 @@ func TestServer_GetGasLimit(t *testing.T) {
 				validatorService: vs,
 			}
 			req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/eth/v1/validator/{pubkey}/gas_limit"), nil)
-			req = mux.SetURLVars(req, map[string]string{"pubkey": hexutil.Encode(tt.pubkey[:])})
+			req.SetPathValue("pubkey", hexutil.Encode(tt.pubkey[:]))
 			w := httptest.NewRecorder()
 			w.Body = &bytes.Buffer{}
 			s.GetGasLimit(w, req)
@@ -955,7 +977,7 @@ func TestServer_SetGasLimit(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	beaconClient := validatormock.NewMockValidatorClient(ctrl)
-	ctx := grpc.NewContextWithServerTransportStream(context.Background(), &runtime.ServerTransportStream{})
+	ctx := context.Background()
 
 	pubkey1, err := hexutil.Decode("0xaf2e7ba294e03438ea819bd4033c6c1bf6b04320ee2075b77273c08d02f8a61bcc303c2c06bd3713cb442072ae591493")
 	pubkey2, err2 := hexutil.Decode("0xbedefeaa94e03438ea819bd4033c6c1bf6b04320ee2075b77273c08d02f8a61bcc303c2cdddddddddddddddddddddddd")
@@ -1091,18 +1113,18 @@ func TestServer_SetGasLimit(t *testing.T) {
 				validatorDB := dbtest.SetupDB(t, [][fieldparams.BLSPubkeyLength]byte{}, isSlashingProtectionMinimal)
 				vs, err := client.NewValidatorService(ctx, &client.Config{
 					Validator: m,
-					ValDB:     validatorDB,
+					DB:        validatorDB,
 				})
 				require.NoError(t, err)
 
 				s := &Server{
 					validatorService:          vs,
 					beaconNodeValidatorClient: beaconClient,
-					valDB:                     validatorDB,
+					db:                        validatorDB,
 				}
 
 				if tt.beaconReturn != nil {
-					beaconClient.EXPECT().GetFeeRecipientByPubKey(
+					beaconClient.EXPECT().FeeRecipientByPubKey(
 						gomock.Any(),
 						gomock.Any(),
 					).Return(tt.beaconReturn.resp, tt.beaconReturn.error)
@@ -1117,7 +1139,7 @@ func TestServer_SetGasLimit(t *testing.T) {
 				require.NoError(t, err)
 
 				req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/eth/v1/validator/{pubkey}/gas_limit"), &buf)
-				req = mux.SetURLVars(req, map[string]string{"pubkey": hexutil.Encode(tt.pubkey)})
+				req.SetPathValue("pubkey", hexutil.Encode(tt.pubkey))
 				w := httptest.NewRecorder()
 				w.Body = &bytes.Buffer{}
 
@@ -1153,7 +1175,7 @@ func TestServer_SetGasLimit_InvalidPubKey(t *testing.T) {
 		validatorService: &client.ValidatorService{},
 	}
 	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/eth/v1/validator/{pubkey}/gas_limit"), nil)
-	req = mux.SetURLVars(req, map[string]string{"pubkey": "0x00"})
+	req.SetPathValue("pubkey", "0x00")
 	w := httptest.NewRecorder()
 	w.Body = &bytes.Buffer{}
 
@@ -1163,7 +1185,7 @@ func TestServer_SetGasLimit_InvalidPubKey(t *testing.T) {
 }
 
 func TestServer_DeleteGasLimit(t *testing.T) {
-	ctx := grpc.NewContextWithServerTransportStream(context.Background(), &runtime.ServerTransportStream{})
+	ctx := context.Background()
 	pubkey1, err := hexutil.Decode("0xaf2e7ba294e03438ea819bd4033c6c1bf6b04320ee2075b77273c08d02f8a61bcc303c2c06bd3713cb442072ae591493")
 	pubkey2, err2 := hexutil.Decode("0xbedefeaa94e03438ea819bd4033c6c1bf6b04320ee2075b77273c08d02f8a61bcc303c2cdddddddddddddddddddddddd")
 	require.NoError(t, err)
@@ -1280,18 +1302,18 @@ func TestServer_DeleteGasLimit(t *testing.T) {
 				validatorDB := dbtest.SetupDB(t, [][fieldparams.BLSPubkeyLength]byte{}, isSlashingProtectionMinimal)
 				vs, err := client.NewValidatorService(ctx, &client.Config{
 					Validator: m,
-					ValDB:     validatorDB,
+					DB:        validatorDB,
 				})
 				require.NoError(t, err)
 				s := &Server{
 					validatorService: vs,
-					valDB:            validatorDB,
+					db:               validatorDB,
 				}
 				// Set up global default value for builder gas limit.
 				params.BeaconConfig().DefaultBuilderGasLimit = uint64(globalDefaultGasLimit)
 
 				req := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/eth/v1/validator/{pubkey}/gas_limit"), nil)
-				req = mux.SetURLVars(req, map[string]string{"pubkey": hexutil.Encode(tt.pubkey)})
+				req.SetPathValue("pubkey", hexutil.Encode(tt.pubkey))
 				w := httptest.NewRecorder()
 				w.Body = &bytes.Buffer{}
 
@@ -1312,16 +1334,17 @@ func TestServer_DeleteGasLimit(t *testing.T) {
 
 func TestServer_ListRemoteKeys(t *testing.T) {
 	ctx := context.Background()
-	w := wallet.NewWalletForWeb3Signer()
+	app := cli.App{}
+	set := flag.NewFlagSet("test", 0)
+	newDir := filepath.Join(t.TempDir(), "new")
+	set.String(flags.WalletDirFlag.Name, newDir, "")
+	w := wallet.NewWalletForWeb3Signer(cli.NewContext(&app, set, nil))
 	root := make([]byte, fieldparams.RootLength)
 	root[0] = 1
-	bytevalue, err := hexutil.Decode("0x93247f2209abcacf57b75a51dafae777f9dd38bc7053d1af526f220a7489a6d3a2753e5f3e8b1cfe39b56f43611df74a")
-	require.NoError(t, err)
-	pubkeys := [][fieldparams.BLSPubkeyLength]byte{bytesutil.ToBytes48(bytevalue)}
 	config := &remoteweb3signer.SetupConfig{
 		BaseEndpoint:          "http://example.com",
 		GenesisValidatorsRoot: root,
-		ProvidedPublicKeys:    pubkeys,
+		ProvidedPublicKeys:    []string{"0x93247f2209abcacf57b75a51dafae777f9dd38bc7053d1af526f220a7489a6d3a2753e5f3e8b1cfe39b56f43611df74a"},
 	}
 	km, err := w.InitializeKeymanager(ctx, iface.InitKeymanagerConfig{ListenForChanges: false, Web3SignerConfig: config})
 	require.NoError(t, err)
@@ -1353,11 +1376,25 @@ func TestServer_ListRemoteKeys(t *testing.T) {
 			require.DeepEqual(t, hexutil.Encode(expectedKeys[i][:]), resp.Data[i].Pubkey)
 		}
 	})
+	t.Run("calling list keystores while using a remote wallet returns empty", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/eth/v1/keystores"), nil)
+		wr := httptest.NewRecorder()
+		wr.Body = &bytes.Buffer{}
+		s.ListKeystores(wr, req)
+		require.Equal(t, http.StatusOK, wr.Code)
+		resp := &ListKeystoresResponse{}
+		require.NoError(t, json.Unmarshal(wr.Body.Bytes(), resp))
+		require.Equal(t, 0, len(resp.Data))
+	})
 }
 
 func TestServer_ImportRemoteKeys(t *testing.T) {
 	ctx := context.Background()
-	w := wallet.NewWalletForWeb3Signer()
+	app := cli.App{}
+	set := flag.NewFlagSet("test", 0)
+	newDir := filepath.Join(t.TempDir(), "new")
+	set.String(flags.WalletDirFlag.Name, newDir, "")
+	w := wallet.NewWalletForWeb3Signer(cli.NewContext(&app, set, nil))
 	root := make([]byte, fieldparams.RootLength)
 	root[0] = 1
 	config := &remoteweb3signer.SetupConfig{
@@ -1414,17 +1451,18 @@ func TestServer_ImportRemoteKeys(t *testing.T) {
 
 func TestServer_DeleteRemoteKeys(t *testing.T) {
 	ctx := context.Background()
-	w := wallet.NewWalletForWeb3Signer()
+	app := cli.App{}
+	set := flag.NewFlagSet("test", 0)
+	newDir := filepath.Join(t.TempDir(), "new")
+	set.String(flags.WalletDirFlag.Name, newDir, "")
+	w := wallet.NewWalletForWeb3Signer(cli.NewContext(&app, set, nil))
 	root := make([]byte, fieldparams.RootLength)
 	root[0] = 1
 	pkey := "0x93247f2209abcacf57b75a51dafae777f9dd38bc7053d1af526f220a7489a6d3a2753e5f3e8b1cfe39b56f43611df74a"
-	bytevalue, err := hexutil.Decode(pkey)
-	require.NoError(t, err)
-	pubkeys := [][fieldparams.BLSPubkeyLength]byte{bytesutil.ToBytes48(bytevalue)}
 	config := &remoteweb3signer.SetupConfig{
 		BaseEndpoint:          "http://example.com",
 		GenesisValidatorsRoot: root,
-		ProvidedPublicKeys:    pubkeys,
+		ProvidedPublicKeys:    []string{pkey},
 	}
 	km, err := w.InitializeKeymanager(ctx, iface.InitKeymanagerConfig{ListenForChanges: false, Web3SignerConfig: config})
 	require.NoError(t, err)
@@ -1538,7 +1576,7 @@ func TestServer_ListFeeRecipientByPubkey(t *testing.T) {
 				validatorService: vs,
 			}
 			req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/eth/v1/validator/{pubkey}/feerecipient"), nil)
-			req = mux.SetURLVars(req, map[string]string{"pubkey": pubkey})
+			req.SetPathValue("pubkey", pubkey)
 			w := httptest.NewRecorder()
 			w.Body = &bytes.Buffer{}
 			s.ListFeeRecipientByPubkey(w, req)
@@ -1562,7 +1600,7 @@ func TestServer_ListFeeRecipientByPubKey_NoFeeRecipientSet(t *testing.T) {
 		validatorService: vs,
 	}
 	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/eth/v1/validator/{pubkey}/feerecipient"), nil)
-	req = mux.SetURLVars(req, map[string]string{"pubkey": "0xaf2e7ba294e03438ea819bd4033c6c1bf6b04320ee2075b77273c08d02f8a61bcc303c2c06bd3713cb442072ae591493"})
+	req.SetPathValue("pubkey", "0xaf2e7ba294e03438ea819bd4033c6c1bf6b04320ee2075b77273c08d02f8a61bcc303c2c06bd3713cb442072ae591493")
 	w := httptest.NewRecorder()
 	w.Body = &bytes.Buffer{}
 	s.ListFeeRecipientByPubkey(w, req)
@@ -1573,7 +1611,7 @@ func TestServer_ListFeeRecipientByPubKey_NoFeeRecipientSet(t *testing.T) {
 func TestServer_ListFeeRecipientByPubkey_ValidatorServiceNil(t *testing.T) {
 	s := &Server{}
 	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/eth/v1/validator/{pubkey}/feerecipient"), nil)
-	req = mux.SetURLVars(req, map[string]string{"pubkey": "0x00"})
+	req.SetPathValue("pubkey", "0x00")
 	w := httptest.NewRecorder()
 	w.Body = &bytes.Buffer{}
 	s.SetFeeRecipientByPubkey(w, req)
@@ -1587,7 +1625,7 @@ func TestServer_ListFeeRecipientByPubkey_InvalidPubKey(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/eth/v1/validator/{pubkey}/feerecipient"), nil)
-	req = mux.SetURLVars(req, map[string]string{"pubkey": "0x00"})
+	req.SetPathValue("pubkey", "0x00")
 	w := httptest.NewRecorder()
 	w.Body = &bytes.Buffer{}
 	s.SetFeeRecipientByPubkey(w, req)
@@ -1600,7 +1638,7 @@ func TestServer_FeeRecipientByPubkey(t *testing.T) {
 	defer ctrl.Finish()
 
 	beaconClient := validatormock.NewMockValidatorClient(ctrl)
-	ctx := grpc.NewContextWithServerTransportStream(context.Background(), &runtime.ServerTransportStream{})
+	ctx := context.Background()
 	pubkey := "0xaf2e7ba294e03438ea819bd4033c6c1bf6b04320ee2075b77273c08d02f8a61bcc303c2c06bd3713cb442072ae591493"
 	byteval, err := hexutil.Decode(pubkey)
 	require.NoError(t, err)
@@ -1744,13 +1782,13 @@ func TestServer_FeeRecipientByPubkey(t *testing.T) {
 				// save a default here
 				vs, err := client.NewValidatorService(ctx, &client.Config{
 					Validator: m,
-					ValDB:     validatorDB,
+					DB:        validatorDB,
 				})
 				require.NoError(t, err)
 				s := &Server{
 					validatorService:          vs,
 					beaconNodeValidatorClient: beaconClient,
-					valDB:                     validatorDB,
+					db:                        validatorDB,
 				}
 				request := &SetFeeRecipientByPubkeyRequest{
 					Ethaddress: tt.args,
@@ -1761,7 +1799,7 @@ func TestServer_FeeRecipientByPubkey(t *testing.T) {
 				require.NoError(t, err)
 
 				req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/eth/v1/validator/{pubkey}/feerecipient"), &buf)
-				req = mux.SetURLVars(req, map[string]string{"pubkey": pubkey})
+				req.SetPathValue("pubkey", pubkey)
 				w := httptest.NewRecorder()
 				w.Body = &bytes.Buffer{}
 				s.SetFeeRecipientByPubkey(w, req)
@@ -1778,7 +1816,7 @@ func TestServer_SetFeeRecipientByPubkey_InvalidPubKey(t *testing.T) {
 		validatorService: &client.ValidatorService{},
 	}
 	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/eth/v1/validator/{pubkey}/feerecipient"), nil)
-	req = mux.SetURLVars(req, map[string]string{"pubkey": "0x00"})
+	req.SetPathValue("pubkey", "0x00")
 	w := httptest.NewRecorder()
 	w.Body = &bytes.Buffer{}
 	s.SetFeeRecipientByPubkey(w, req)
@@ -1800,7 +1838,7 @@ func TestServer_SetFeeRecipientByPubkey_InvalidFeeRecipient(t *testing.T) {
 	err := json.NewEncoder(&buf).Encode(request)
 	require.NoError(t, err)
 	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/eth/v1/validator/{pubkey}/feerecipient"), &buf)
-	req = mux.SetURLVars(req, map[string]string{"pubkey": pubkey})
+	req.SetPathValue("pubkey", pubkey)
 	w := httptest.NewRecorder()
 	w.Body = &bytes.Buffer{}
 	s.SetFeeRecipientByPubkey(w, req)
@@ -1810,7 +1848,7 @@ func TestServer_SetFeeRecipientByPubkey_InvalidFeeRecipient(t *testing.T) {
 }
 
 func TestServer_DeleteFeeRecipientByPubkey(t *testing.T) {
-	ctx := grpc.NewContextWithServerTransportStream(context.Background(), &runtime.ServerTransportStream{})
+	ctx := context.Background()
 	pubkey := "0xaf2e7ba294e03438ea819bd4033c6c1bf6b04320ee2075b77273c08d02f8a61bcc303c2c06bd3713cb442072ae591493"
 	byteval, err := hexutil.Decode(pubkey)
 	require.NoError(t, err)
@@ -1854,15 +1892,15 @@ func TestServer_DeleteFeeRecipientByPubkey(t *testing.T) {
 				validatorDB := dbtest.SetupDB(t, [][fieldparams.BLSPubkeyLength]byte{}, isSlashingProtectionMinimal)
 				vs, err := client.NewValidatorService(ctx, &client.Config{
 					Validator: m,
-					ValDB:     validatorDB,
+					DB:        validatorDB,
 				})
 				require.NoError(t, err)
 				s := &Server{
 					validatorService: vs,
-					valDB:            validatorDB,
+					db:               validatorDB,
 				}
 				req := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/eth/v1/validator/{pubkey}/feerecipient"), nil)
-				req = mux.SetURLVars(req, map[string]string{"pubkey": pubkey})
+				req.SetPathValue("pubkey", pubkey)
 				w := httptest.NewRecorder()
 				w.Body = &bytes.Buffer{}
 				s.DeleteFeeRecipientByPubkey(w, req)
@@ -1876,7 +1914,7 @@ func TestServer_DeleteFeeRecipientByPubkey(t *testing.T) {
 func TestServer_DeleteFeeRecipientByPubkey_ValidatorServiceNil(t *testing.T) {
 	s := &Server{}
 	req := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/eth/v1/validator/{pubkey}/feerecipient"), nil)
-	req = mux.SetURLVars(req, map[string]string{"pubkey": "0x1234567878903438ea819bd4033c6c1bf6b04320ee2075b77273c08d02f8a61bcc303c2c06bd3713cb442072ae591493"})
+	req.SetPathValue("pubkey", "0x1234567878903438ea819bd4033c6c1bf6b04320ee2075b77273c08d02f8a61bcc303c2c06bd3713cb442072ae591493")
 	w := httptest.NewRecorder()
 	w.Body = &bytes.Buffer{}
 	s.DeleteFeeRecipientByPubkey(w, req)
@@ -1890,7 +1928,7 @@ func TestServer_DeleteFeeRecipientByPubkey_InvalidPubKey(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/eth/v1/validator/{pubkey}/feerecipient"), nil)
-	req = mux.SetURLVars(req, map[string]string{"pubkey": "0x123"})
+	req.SetPathValue("pubkey", "0x123")
 	w := httptest.NewRecorder()
 	w.Body = &bytes.Buffer{}
 	s.DeleteFeeRecipientByPubkey(w, req)
@@ -1919,14 +1957,14 @@ func TestServer_Graffiti(t *testing.T) {
 	err = json.NewEncoder(&buf).Encode(request)
 	require.NoError(t, err)
 	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/eth/v1/validator/{pubkey}/graffiti"), &buf)
-	req = mux.SetURLVars(req, map[string]string{"pubkey": pubkey})
+	req.SetPathValue("pubkey", pubkey)
 	w := httptest.NewRecorder()
 	w.Body = &bytes.Buffer{}
 	s.SetGraffiti(w, req)
 	require.Equal(t, http.StatusOK, w.Code)
 
 	req = httptest.NewRequest(http.MethodGet, fmt.Sprintf("/eth/v1/validator/{pubkey}/graffiti"), nil)
-	req = mux.SetURLVars(req, map[string]string{"pubkey": pubkey})
+	req.SetPathValue("pubkey", pubkey)
 	w = httptest.NewRecorder()
 	w.Body = &bytes.Buffer{}
 	s.GetGraffiti(w, req)
@@ -1937,7 +1975,7 @@ func TestServer_Graffiti(t *testing.T) {
 	assert.Equal(t, resp.Data.Pubkey, pubkey)
 
 	req = httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/eth/v1/validator/{pubkey}/graffiti"), nil)
-	req = mux.SetURLVars(req, map[string]string{"pubkey": pubkey})
+	req.SetPathValue("pubkey", pubkey)
 	w = httptest.NewRecorder()
 	w.Body = &bytes.Buffer{}
 	s.DeleteGraffiti(w, req)

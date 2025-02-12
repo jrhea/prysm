@@ -406,7 +406,7 @@ func TestRegularSyncBeaconBlockSubscriber_ProcessPendingBlocks_2Chains(t *testin
 	r.initCaches()
 
 	p1.Peers().Add(new(enr.Record), p2.PeerID(), nil, network.DirOutbound)
-	p1.Peers().SetConnectionState(p2.PeerID(), peers.PeerConnected)
+	p1.Peers().SetConnectionState(p2.PeerID(), peers.Connected)
 	p1.Peers().SetChainState(p2.PeerID(), &ethpb.Status{})
 
 	b0 := util.NewBeaconBlock()
@@ -505,7 +505,7 @@ func TestRegularSyncBeaconBlockSubscriber_PruneOldPendingBlocks(t *testing.T) {
 	r.initCaches()
 
 	p1.Peers().Add(new(enr.Record), p1.PeerID(), nil, network.DirOutbound)
-	p1.Peers().SetConnectionState(p1.PeerID(), peers.PeerConnected)
+	p1.Peers().SetConnectionState(p1.PeerID(), peers.Connected)
 	p1.Peers().SetChainState(p1.PeerID(), &ethpb.Status{})
 
 	b0 := util.NewBeaconBlock()
@@ -611,7 +611,7 @@ func TestService_BatchRootRequest(t *testing.T) {
 	r.initCaches()
 
 	p1.Peers().Add(new(enr.Record), p2.PeerID(), nil, network.DirOutbound)
-	p1.Peers().SetConnectionState(p2.PeerID(), peers.PeerConnected)
+	p1.Peers().SetConnectionState(p2.PeerID(), peers.Connected)
 	p1.Peers().SetChainState(p2.PeerID(), &ethpb.Status{FinalizedEpoch: 2})
 
 	b0 := util.NewBeaconBlock()
@@ -646,7 +646,7 @@ func TestService_BatchRootRequest(t *testing.T) {
 	b4Root, err := b4.Block.HashTreeRoot()
 	require.NoError(t, err)
 
-	// Send in duplicated roots to also test deduplicaton.
+	// Send in duplicated roots to also test deduplication.
 	sentRoots := p2ptypes.BeaconBlockByRootsReq{b2Root, b2Root, b3Root, b3Root, b4Root, b5Root}
 	expectedRoots := p2ptypes.BeaconBlockByRootsReq{b2Root, b3Root, b4Root, b5Root}
 
@@ -684,9 +684,9 @@ func TestService_AddPendingBlockToQueueOverMax(t *testing.T) {
 	}
 
 	b := util.NewBeaconBlock()
-	b1 := ethpb.CopySignedBeaconBlock(b)
+	b1 := b.Copy()
 	b1.Block.StateRoot = []byte{'a'}
-	b2 := ethpb.CopySignedBeaconBlock(b)
+	b2 := b.Copy()
 	b2.Block.StateRoot = []byte{'b'}
 	wsb, err := blocks.NewSignedBeaconBlock(b)
 	require.NoError(t, err)
@@ -698,7 +698,7 @@ func TestService_AddPendingBlockToQueueOverMax(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, r.insertBlockToPendingQueue(0, wsb, [32]byte{2}))
 
-	b3 := ethpb.CopySignedBeaconBlock(b)
+	b3 := b.Copy()
 	b3.Block.StateRoot = []byte{'c'}
 	wsb, err = blocks.NewSignedBeaconBlock(b2)
 	require.NoError(t, err)

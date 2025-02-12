@@ -20,14 +20,15 @@ The process for implementing new features using this package is as follows:
 package features
 
 import (
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/sirupsen/logrus"
-	"github.com/urfave/cli/v2"
-
 	"github.com/prysmaticlabs/prysm/v5/cmd"
 	"github.com/prysmaticlabs/prysm/v5/config/params"
+	"github.com/sirupsen/logrus"
+	"github.com/urfave/cli/v2"
 )
 
 var log = logrus.WithField("prefix", "flags")
@@ -42,10 +43,13 @@ type Flags struct {
 	WriteSSZStateTransitions            bool // WriteSSZStateTransitions to tmp directory.
 	EnablePeerScorer                    bool // EnablePeerScorer enables experimental peer scoring in p2p.
 	EnableLightClient                   bool // EnableLightClient enables light client APIs.
+	EnableQUIC                          bool // EnableQUIC specifies whether to enable QUIC transport for libp2p.
 	WriteWalletPasswordOnWebOnboarding  bool // WriteWalletPasswordOnWebOnboarding writes the password to disk after Prysm web signup.
 	EnableDoppelGanger                  bool // EnableDoppelGanger enables doppelganger protection on startup for the validator.
 	EnableHistoricalSpaceRepresentation bool // EnableHistoricalSpaceRepresentation enables the saving of registry validators in separate buckets to save space
 	EnableBeaconRESTApi                 bool // EnableBeaconRESTApi enables experimental usage of the beacon REST API by the validator when querying a beacon node
+	DisableCommitteeAwarePacking        bool // DisableCommitteeAwarePacking changes the attestation packing algorithm to one that is not aware of attesting committees.
+	EnableExperimentalAttestationPool   bool // EnableExperimentalAttestationPool enables an experimental attestation pool design.
 	// Logging related toggles.
 	DisableGRPCConnectionLogs bool // Disables logging when a new grpc client has connected.
 	EnableFullSSZDataLogging  bool // Enables logging for full ssz data on rejected gossip messages
@@ -67,7 +71,6 @@ type Flags struct {
 	DisableStakinContractCheck bool // Disables check for deposit contract when proposing blocks
 
 	EnableVerboseSigVerification bool // EnableVerboseSigVerification specifies whether to verify individual signature if batch verification fails
-	EnableEIP4881                bool // EnableEIP4881 specifies whether to use the deposit tree from EIP4881
 
 	PrepareAllPayloads bool // PrepareAllPayloads informs the engine to prepare a block on every slot.
 	// BlobSaveFsync requires blob saving to block on fsync to ensure blobs are durably persisted before passing DA.
@@ -75,6 +78,8 @@ type Flags struct {
 
 	SaveInvalidBlock bool // SaveInvalidBlock saves invalid block to temp.
 	SaveInvalidBlob  bool // SaveInvalidBlob saves invalid blob to temp.
+
+	EnableDiscoveryReboot bool // EnableDiscoveryReboot allows the node to have its local listener to be rebooted in the event of discovery issues.
 
 	// KeystoreImportDebounceInterval specifies the time duration the validator waits to reload new keys if they have
 	// changed on disk. This feature is for advanced use cases only.
@@ -123,14 +128,7 @@ func InitWithReset(c *Flags) func() {
 
 // configureTestnet sets the config according to specified testnet flag
 func configureTestnet(ctx *cli.Context) error {
-	if ctx.Bool(PraterTestnet.Name) {
-		log.Info("Running on the Prater Testnet")
-		if err := params.SetActive(params.PraterConfig().Copy()); err != nil {
-			return err
-		}
-		applyPraterFeatureFlags(ctx)
-		params.UsePraterNetworkConfig()
-	} else if ctx.Bool(SepoliaTestnet.Name) {
+	if ctx.Bool(SepoliaTestnet.Name) {
 		log.Info("Running on the Sepolia Beacon Chain Testnet")
 		if err := params.SetActive(params.SepoliaConfig().Copy()); err != nil {
 			return err
@@ -157,10 +155,6 @@ func configureTestnet(ctx *cli.Context) error {
 	return nil
 }
 
-// Insert feature flags within the function to be enabled for Prater testnet.
-func applyPraterFeatureFlags(ctx *cli.Context) {
-}
-
 // Insert feature flags within the function to be enabled for Sepolia testnet.
 func applySepoliaFeatureFlags(ctx *cli.Context) {
 }
@@ -172,6 +166,7 @@ func applyHoleskyFeatureFlags(ctx *cli.Context) {
 // ConfigureBeaconChain sets the global config based
 // on what flags are enabled for the beacon-chain client.
 func ConfigureBeaconChain(ctx *cli.Context) error {
+	warnDeprecationUpcoming(ctx)
 	complainOnDeprecatedFlags(ctx)
 	cfg := &Flags{}
 	if ctx.Bool(devModeFlag.Name) {
@@ -181,9 +176,10 @@ func ConfigureBeaconChain(ctx *cli.Context) error {
 		return err
 	}
 
-	if ctx.Bool(enableExperimentalState.Name) {
-		logEnabled(enableExperimentalState)
-		cfg.EnableExperimentalState = true
+	cfg.EnableExperimentalState = true
+	if ctx.Bool(disableExperimentalState.Name) {
+		logEnabled(disableExperimentalState)
+		cfg.EnableExperimentalState = false
 	}
 
 	if ctx.Bool(writeSSZStateTransitionsFlag.Name) {
@@ -252,11 +248,6 @@ func ConfigureBeaconChain(ctx *cli.Context) error {
 		logEnabled(disableResourceManager)
 		cfg.DisableResourceManager = true
 	}
-	cfg.EnableEIP4881 = true
-	if ctx.IsSet(DisableEIP4881.Name) {
-		logEnabled(DisableEIP4881)
-		cfg.EnableEIP4881 = false
-	}
 	if ctx.IsSet(EnableLightClient.Name) {
 		logEnabled(EnableLightClient)
 		cfg.EnableLightClient = true
@@ -264,6 +255,23 @@ func ConfigureBeaconChain(ctx *cli.Context) error {
 	if ctx.IsSet(BlobSaveFsync.Name) {
 		logEnabled(BlobSaveFsync)
 		cfg.BlobSaveFsync = true
+	}
+	cfg.EnableQUIC = true
+	if ctx.IsSet(DisableQUIC.Name) {
+		logDisabled(DisableQUIC)
+		cfg.EnableQUIC = false
+	}
+	if ctx.IsSet(DisableCommitteeAwarePacking.Name) {
+		logEnabled(DisableCommitteeAwarePacking)
+		cfg.DisableCommitteeAwarePacking = true
+	}
+	if ctx.IsSet(EnableDiscoveryReboot.Name) {
+		logEnabled(EnableDiscoveryReboot)
+		cfg.EnableDiscoveryReboot = true
+	}
+	if ctx.IsSet(enableExperimentalAttestationPool.Name) {
+		logEnabled(enableExperimentalAttestationPool)
+		cfg.EnableExperimentalAttestationPool = true
 	}
 
 	cfg.AggregateIntervals = [3]time.Duration{aggregateFirstInterval.Value, aggregateSecondInterval.Value, aggregateThirdInterval.Value}
@@ -329,6 +337,22 @@ func complainOnDeprecatedFlags(ctx *cli.Context) {
 	}
 }
 
+var upcomingDeprecationExtra = map[string]string{
+	enableHistoricalSpaceRepresentation.Name: "The node needs to be resynced after flag removal.",
+}
+
+func warnDeprecationUpcoming(ctx *cli.Context) {
+	for _, f := range upcomingDeprecation {
+		if ctx.IsSet(f.Names()[0]) {
+			extra := "Please remove this flag from your configuration."
+			if special, ok := upcomingDeprecationExtra[f.Names()[0]]; ok {
+				extra += " " + special
+			}
+			log.Warnf("--%s is pending deprecation and will be removed in the next release. %s", f.Names()[0], extra)
+		}
+	}
+}
+
 func logEnabled(flag cli.DocGenerationFlag) {
 	var name string
 	if names := flag.Names(); len(names) > 0 {
@@ -343,4 +367,26 @@ func logDisabled(flag cli.DocGenerationFlag) {
 		name = names[0]
 	}
 	log.WithField(name, flag.GetUsage()).Warn(disabledFeatureFlag)
+}
+
+// ValidateNetworkFlags validates provided flags and
+// prevents beacon node or validator to start
+// if more than one network flag is provided
+func ValidateNetworkFlags(ctx *cli.Context) error {
+	networkFlagsCount := 0
+	for _, flag := range NetworkFlags {
+		if ctx.IsSet(flag.Names()[0]) {
+			networkFlagsCount++
+			if networkFlagsCount > 1 {
+				// using a forLoop so future addition
+				// doesn't require changes in this function
+				var flagNames []string
+				for _, flag := range NetworkFlags {
+					flagNames = append(flagNames, "--"+flag.Names()[0])
+				}
+				return fmt.Errorf("cannot use more than one network flag at the same time. Possible network flags are: %s", strings.Join(flagNames, ", "))
+			}
+		}
+	}
+	return nil
 }

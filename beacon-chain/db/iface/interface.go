@@ -56,6 +56,10 @@ type ReadOnlyDatabase interface {
 	// Fee recipients operations.
 	FeeRecipientByValidatorID(ctx context.Context, id primitives.ValidatorIndex) (common.Address, error)
 	RegistrationByValidatorID(ctx context.Context, id primitives.ValidatorIndex) (*ethpb.ValidatorRegistrationV1, error)
+	// light client operations
+	LightClientUpdates(ctx context.Context, startPeriod, endPeriod uint64) (map[uint64]interfaces.LightClientUpdate, error)
+	LightClientUpdate(ctx context.Context, period uint64) (interfaces.LightClientUpdate, error)
+	LightClientBootstrap(ctx context.Context, blockRoot []byte) (interfaces.LightClientBootstrap, error)
 
 	// origin checkpoint sync support
 	OriginCheckpointBlockRoot(ctx context.Context) ([32]byte, error)
@@ -92,8 +96,12 @@ type NoHeadAccessDatabase interface {
 	// Fee recipients operations.
 	SaveFeeRecipientsByValidatorIDs(ctx context.Context, ids []primitives.ValidatorIndex, addrs []common.Address) error
 	SaveRegistrationsByValidatorIDs(ctx context.Context, ids []primitives.ValidatorIndex, regs []*ethpb.ValidatorRegistrationV1) error
+	// light client operations
+	SaveLightClientUpdate(ctx context.Context, period uint64, update interfaces.LightClientUpdate) error
+	SaveLightClientBootstrap(ctx context.Context, blockRoot []byte, bootstrap interfaces.LightClientBootstrap) error
 
 	CleanUpDirtyStates(ctx context.Context, slotsPerArchivedPoint primitives.Slot) error
+	DeleteHistoricalDataBeforeSlot(ctx context.Context, slot primitives.Slot) error
 }
 
 // HeadAccessDatabase defines a struct with access to reading chain head data.
@@ -161,6 +169,7 @@ type SlasherDatabase interface {
 	) ([]*ethpb.HighestAttestation, error)
 	DatabasePath() string
 	ClearDB() error
+	Migrate(ctx context.Context, headEpoch, maxPruningEpoch primitives.Epoch, batchSize int) error
 }
 
 // Database interface with full access.

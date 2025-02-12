@@ -4,18 +4,19 @@ import (
 	"context"
 
 	"github.com/pkg/errors"
-	"github.com/prysmaticlabs/prysm/v5/beacon-chain/core/helpers"
 	"github.com/prysmaticlabs/prysm/v5/consensus-types/primitives"
+	"github.com/prysmaticlabs/prysm/v5/monitoring/tracing/trace"
 	ethpb "github.com/prysmaticlabs/prysm/v5/proto/prysm/v1alpha1"
-	"go.opencensus.io/trace"
+	"github.com/prysmaticlabs/prysm/v5/proto/prysm/v1alpha1/attestation"
+	"github.com/prysmaticlabs/prysm/v5/runtime/version"
 )
 
 // SaveUnaggregatedAttestation saves an unaggregated attestation in cache.
-func (c *AttCaches) SaveUnaggregatedAttestation(att *ethpb.Attestation) error {
-	if att == nil {
+func (c *AttCaches) SaveUnaggregatedAttestation(att ethpb.Att) error {
+	if att == nil || att.IsNil() {
 		return nil
 	}
-	if helpers.IsAggregated(att) {
+	if att.IsAggregated() {
 		return errors.New("attestation is aggregated")
 	}
 
@@ -27,20 +28,20 @@ func (c *AttCaches) SaveUnaggregatedAttestation(att *ethpb.Attestation) error {
 		return nil
 	}
 
-	r, err := hashFn(att)
+	id, err := attestation.NewId(att, attestation.Full)
 	if err != nil {
-		return errors.Wrap(err, "could not tree hash attestation")
+		return errors.Wrap(err, "could not create attestation ID")
 	}
-	att = ethpb.CopyAttestation(att) // Copied.
+
 	c.unAggregateAttLock.Lock()
 	defer c.unAggregateAttLock.Unlock()
-	c.unAggregatedAtt[r] = att
+	c.unAggregatedAtt[id] = att
 
 	return nil
 }
 
 // SaveUnaggregatedAttestations saves a list of unaggregated attestations in cache.
-func (c *AttCaches) SaveUnaggregatedAttestations(atts []*ethpb.Attestation) error {
+func (c *AttCaches) SaveUnaggregatedAttestations(atts []ethpb.Att) error {
 	for _, att := range atts {
 		if err := c.SaveUnaggregatedAttestation(att); err != nil {
 			return err
@@ -51,18 +52,18 @@ func (c *AttCaches) SaveUnaggregatedAttestations(atts []*ethpb.Attestation) erro
 }
 
 // UnaggregatedAttestations returns all the unaggregated attestations in cache.
-func (c *AttCaches) UnaggregatedAttestations() ([]*ethpb.Attestation, error) {
+func (c *AttCaches) UnaggregatedAttestations() ([]ethpb.Att, error) {
 	c.unAggregateAttLock.RLock()
 	defer c.unAggregateAttLock.RUnlock()
 	unAggregatedAtts := c.unAggregatedAtt
-	atts := make([]*ethpb.Attestation, 0, len(unAggregatedAtts))
+	atts := make([]ethpb.Att, 0, len(unAggregatedAtts))
 	for _, att := range unAggregatedAtts {
 		seen, err := c.hasSeenBit(att)
 		if err != nil {
 			return nil, err
 		}
 		if !seen {
-			atts = append(atts, ethpb.CopyAttestation(att) /* Copied */)
+			atts = append(atts, att.Clone())
 		}
 	}
 	return atts, nil
@@ -70,7 +71,11 @@ func (c *AttCaches) UnaggregatedAttestations() ([]*ethpb.Attestation, error) {
 
 // UnaggregatedAttestationsBySlotIndex returns the unaggregated attestations in cache,
 // filtered by committee index and slot.
-func (c *AttCaches) UnaggregatedAttestationsBySlotIndex(ctx context.Context, slot primitives.Slot, committeeIndex primitives.CommitteeIndex) []*ethpb.Attestation {
+func (c *AttCaches) UnaggregatedAttestationsBySlotIndex(
+	ctx context.Context,
+	slot primitives.Slot,
+	committeeIndex primitives.CommitteeIndex,
+) []*ethpb.Attestation {
 	_, span := trace.StartSpan(ctx, "operations.attestations.kv.UnaggregatedAttestationsBySlotIndex")
 	defer span.End()
 
@@ -81,8 +86,41 @@ func (c *AttCaches) UnaggregatedAttestationsBySlotIndex(ctx context.Context, slo
 
 	unAggregatedAtts := c.unAggregatedAtt
 	for _, a := range unAggregatedAtts {
-		if slot == a.Data.Slot && committeeIndex == a.Data.CommitteeIndex {
-			atts = append(atts, a)
+		if a.Version() == version.Phase0 && slot == a.GetData().Slot && committeeIndex == a.GetData().CommitteeIndex {
+			att, ok := a.(*ethpb.Attestation)
+			// This will never fail in practice because we asserted the version
+			if ok {
+				atts = append(atts, att)
+			}
+		}
+	}
+
+	return atts
+}
+
+// UnaggregatedAttestationsBySlotIndexElectra returns the unaggregated attestations in cache,
+// filtered by committee index and slot.
+func (c *AttCaches) UnaggregatedAttestationsBySlotIndexElectra(
+	ctx context.Context,
+	slot primitives.Slot,
+	committeeIndex primitives.CommitteeIndex,
+) []*ethpb.AttestationElectra {
+	_, span := trace.StartSpan(ctx, "operations.attestations.kv.UnaggregatedAttestationsBySlotIndexElectra")
+	defer span.End()
+
+	atts := make([]*ethpb.AttestationElectra, 0)
+
+	c.unAggregateAttLock.RLock()
+	defer c.unAggregateAttLock.RUnlock()
+
+	unAggregatedAtts := c.unAggregatedAtt
+	for _, a := range unAggregatedAtts {
+		if a.Version() >= version.Electra && slot == a.GetData().Slot && a.CommitteeBitsVal().BitAt(uint64(committeeIndex)) {
+			att, ok := a.(*ethpb.AttestationElectra)
+			// This will never fail in practice because we asserted the version
+			if ok {
+				atts = append(atts, att)
+			}
 		}
 	}
 
@@ -90,11 +128,11 @@ func (c *AttCaches) UnaggregatedAttestationsBySlotIndex(ctx context.Context, slo
 }
 
 // DeleteUnaggregatedAttestation deletes the unaggregated attestations in cache.
-func (c *AttCaches) DeleteUnaggregatedAttestation(att *ethpb.Attestation) error {
-	if att == nil {
+func (c *AttCaches) DeleteUnaggregatedAttestation(att ethpb.Att) error {
+	if att == nil || att.IsNil() {
 		return nil
 	}
-	if helpers.IsAggregated(att) {
+	if att.IsAggregated() {
 		return errors.New("attestation is aggregated")
 	}
 
@@ -102,14 +140,14 @@ func (c *AttCaches) DeleteUnaggregatedAttestation(att *ethpb.Attestation) error 
 		return err
 	}
 
-	r, err := hashFn(att)
+	id, err := attestation.NewId(att, attestation.Full)
 	if err != nil {
-		return errors.Wrap(err, "could not tree hash attestation")
+		return errors.Wrap(err, "could not create attestation ID")
 	}
 
 	c.unAggregateAttLock.Lock()
 	defer c.unAggregateAttLock.Unlock()
-	delete(c.unAggregatedAtt, r)
+	delete(c.unAggregatedAtt, id)
 
 	return nil
 }
@@ -122,7 +160,7 @@ func (c *AttCaches) DeleteSeenUnaggregatedAttestations() (int, error) {
 
 	count := 0
 	for r, att := range c.unAggregatedAtt {
-		if att == nil || helpers.IsAggregated(att) {
+		if att == nil || att.IsNil() || att.IsAggregated() {
 			continue
 		}
 		if seen, err := c.hasSeenBit(att); err == nil && seen {

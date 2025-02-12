@@ -4,7 +4,9 @@ package cmd
 import (
 	"fmt"
 	"math"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/prysmaticlabs/prysm/v5/config/params"
 	"github.com/urfave/cli/v2"
@@ -112,13 +114,19 @@ var (
 	// P2PUDPPort defines the port to be used by discv5.
 	P2PUDPPort = &cli.IntFlag{
 		Name:  "p2p-udp-port",
-		Usage: "The port used by discv5.",
+		Usage: "The UDP port used by the discovery service discv5.",
 		Value: 12000,
 	}
-	// P2PTCPPort defines the port to be used by libp2p.
+	// P2PQUICPort defines the QUIC port to be used by libp2p.
+	P2PQUICPort = &cli.IntFlag{
+		Name:  "p2p-quic-port",
+		Usage: "The QUIC port used by libp2p.",
+		Value: 13000,
+	}
+	// P2PTCPPort defines the TCP port to be used by libp2p.
 	P2PTCPPort = &cli.IntFlag{
 		Name:  "p2p-tcp-port",
-		Usage: "The port used by libp2p.",
+		Usage: "The TCP port used by libp2p.",
 		Value: 13000,
 	}
 	// P2PIP defines the local IP to be used by libp2p.
@@ -260,10 +268,10 @@ var (
 		Value: DefaultDataDir(),
 	}
 	// ApiTimeoutFlag specifies the timeout value for API requests in seconds. A timeout of zero means no timeout.
-	ApiTimeoutFlag = &cli.IntFlag{
+	ApiTimeoutFlag = &cli.DurationFlag{
 		Name:  "api-timeout",
 		Usage: "Specifies the timeout value for API requests in seconds.",
-		Value: 120,
+		Value: 10 * time.Second,
 	}
 	// JwtOutputFileFlag specifies the JWT file path that gets generated into when invoked by generate-jwt-secret.
 	JwtOutputFileFlag = &cli.StringFlag{
@@ -323,10 +331,10 @@ func ValidateNoArgs(ctx *cli.Context) error {
 
 // verifies that the provided command is in the command list.
 func checkCommandList(commands []*cli.Command, name string) *cli.Command {
-	for _, c := range commands {
-		if c.Name == name {
-			return c
-		}
+	if i := slices.IndexFunc(commands, func(c *cli.Command) bool {
+		return c.Name == name
+	}); i >= 0 {
+		return commands[i]
 	}
 	return nil
 }

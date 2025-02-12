@@ -8,12 +8,6 @@ import (
 )
 
 var (
-	// PraterTestnet flag for the multiclient Ethereum consensus testnet.
-	PraterTestnet = &cli.BoolFlag{
-		Name:    "prater",
-		Usage:   "Runs Prysm configured for the Prater / Goerli test network.",
-		Aliases: []string{"goerli"},
-	}
 	// SepoliaTestnet flag for the multiclient Ethereum consensus testnet.
 	SepoliaTestnet = &cli.BoolFlag{
 		Name:  "sepolia",
@@ -34,9 +28,9 @@ var (
 		Name:  "dev",
 		Usage: "Enables experimental features still in development. These features may not be stable.",
 	}
-	enableExperimentalState = &cli.BoolFlag{
-		Name:  "enable-experimental-state",
-		Usage: "Turns on the latest and greatest (but potentially unstable) changes to the beacon state.",
+	disableExperimentalState = &cli.BoolFlag{
+		Name:  "disable-experimental-state",
+		Usage: "Turns off the latest and greatest changes to the beacon state. Disabling this is safe to do after the feature has been enabled.",
 	}
 	writeSSZStateTransitionsFlag = &cli.BoolFlag{
 		Name:  "interop-write-ssz-state-transitions",
@@ -109,8 +103,8 @@ var (
 	}
 	enableDoppelGangerProtection = &cli.BoolFlag{
 		Name: "enable-doppelganger",
-		Usage: `Enables the validator to perform a doppelganger check.
-		This is not "a foolproof method to find duplicate instances in the network.
+		Usage: `Enables the validator to perform a doppelganger check. 
+		This is not a foolproof method to find duplicate instances in the network. 
 		Your validator will still be vulnerable if it is being run in unsafe configurations.`,
 	}
 	disableStakinContractCheck = &cli.BoolFlag{
@@ -149,12 +143,8 @@ var (
 		Name:  "prepare-all-payloads",
 		Usage: "Informs the engine to prepare all local payloads. Useful for relayers and builders.",
 	}
-	DisableEIP4881 = &cli.BoolFlag{
-		Name:  "disable-eip-4881",
-		Usage: "Disables the deposit tree specified in EIP-4881.",
-	}
 	EnableLightClient = &cli.BoolFlag{
-		Name:  "enable-lightclient",
+		Name:  "enable-light-client",
 		Usage: "Enables the light client support in the beacon node",
 	}
 	disableResourceManager = &cli.BoolFlag{
@@ -171,11 +161,27 @@ var (
 		Name:  "blob-save-fsync",
 		Usage: "Forces new blob files to be fysnc'd before continuing, ensuring durable blob writes.",
 	}
+	// DisableQUIC disables connecting to peers using the QUIC protocol.
+	DisableQUIC = &cli.BoolFlag{
+		Name:  "disable-quic",
+		Usage: "Disables connecting using the QUIC protocol with peers.",
+	}
+	DisableCommitteeAwarePacking = &cli.BoolFlag{
+		Name:  "disable-committee-aware-packing",
+		Usage: "Changes the attestation packing algorithm to one that is not aware of attesting committees.",
+	}
+	EnableDiscoveryReboot = &cli.BoolFlag{
+		Name:  "enable-discovery-reboot",
+		Usage: "Experimental: Enables the discovery listener to rebooted in the event of connectivity issues.",
+	}
+	enableExperimentalAttestationPool = &cli.BoolFlag{
+		Name:  "enable-experimental-attestation-pool",
+		Usage: "Enables an experimental attestation pool design.",
+	}
 )
 
 // devModeFlags holds list of flags that are set when development mode is on.
 var devModeFlags = []cli.Flag{
-	enableExperimentalState,
 	backfill.EnableExperimentalBackfill,
 }
 
@@ -183,7 +189,6 @@ var devModeFlags = []cli.Flag{
 var ValidatorFlags = append(deprecatedFlags, []cli.Flag{
 	writeWalletPasswordOnWebOnboarding,
 	HoleskyTestnet,
-	PraterTestnet,
 	SepoliaTestnet,
 	Mainnet,
 	dynamicKeyReloadDebounceInterval,
@@ -200,21 +205,19 @@ var E2EValidatorFlags = []string{
 }
 
 // BeaconChainFlags contains a list of all the feature flags that apply to the beacon-chain client.
-var BeaconChainFlags = append(deprecatedBeaconFlags, append(deprecatedFlags, []cli.Flag{
+var BeaconChainFlags = combinedFlags([]cli.Flag{
 	devModeFlag,
-	enableExperimentalState,
+	disableExperimentalState,
 	writeSSZStateTransitionsFlag,
 	saveInvalidBlockTempFlag,
 	saveInvalidBlobTempFlag,
 	disableGRPCConnectionLogging,
 	HoleskyTestnet,
-	PraterTestnet,
 	SepoliaTestnet,
 	Mainnet,
 	disablePeerScorer,
 	disableBroadcastSlashingFlag,
 	enableSlasherFlag,
-	enableHistoricalSpaceRepresentation,
 	disableStakinContractCheck,
 	SaveFullExecutionPayloads,
 	enableStartupOptimistic,
@@ -224,12 +227,26 @@ var BeaconChainFlags = append(deprecatedBeaconFlags, append(deprecatedFlags, []c
 	aggregateFirstInterval,
 	aggregateSecondInterval,
 	aggregateThirdInterval,
-	DisableEIP4881,
 	disableResourceManager,
 	DisableRegistrationCache,
 	EnableLightClient,
 	BlobSaveFsync,
-}...)...)
+	DisableQUIC,
+	DisableCommitteeAwarePacking,
+	EnableDiscoveryReboot,
+	enableExperimentalAttestationPool,
+}, deprecatedBeaconFlags, deprecatedFlags, upcomingDeprecation)
+
+func combinedFlags(flags ...[]cli.Flag) []cli.Flag {
+	if len(flags) == 0 {
+		return []cli.Flag{}
+	}
+	collected := flags[0]
+	for _, f := range flags[1:] {
+		collected = append(collected, f...)
+	}
+	return collected
+}
 
 // E2EBeaconChainFlags contains a list of the beacon chain feature flags to be tested in E2E.
 var E2EBeaconChainFlags = []string{
@@ -239,7 +256,6 @@ var E2EBeaconChainFlags = []string{
 // NetworkFlags contains a list of network flags.
 var NetworkFlags = []cli.Flag{
 	Mainnet,
-	PraterTestnet,
 	SepoliaTestnet,
 	HoleskyTestnet,
 }

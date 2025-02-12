@@ -11,6 +11,7 @@ import (
 	fieldparams "github.com/prysmaticlabs/prysm/v5/config/fieldparams"
 	"github.com/prysmaticlabs/prysm/v5/consensus-types/interfaces"
 	"github.com/prysmaticlabs/prysm/v5/consensus-types/primitives"
+	"github.com/prysmaticlabs/prysm/v5/crypto/bls"
 	enginev1 "github.com/prysmaticlabs/prysm/v5/proto/engine/v1"
 	ethpb "github.com/prysmaticlabs/prysm/v5/proto/prysm/v1alpha1"
 )
@@ -48,6 +49,7 @@ type ReadOnlyBeaconState interface {
 	ReadOnlyStateRoots
 	ReadOnlyRandaoMixes
 	ReadOnlyEth1Data
+	ReadOnlyExits
 	ReadOnlyValidators
 	ReadOnlyBalances
 	ReadOnlyCheckpoint
@@ -56,6 +58,8 @@ type ReadOnlyBeaconState interface {
 	ReadOnlyParticipation
 	ReadOnlyInactivity
 	ReadOnlySyncCommittee
+	ReadOnlyDeposits
+	ReadOnlyConsolidations
 	ToProtoUnsafe() interface{}
 	ToProto() interface{}
 	GenesisTime() uint64
@@ -87,6 +91,9 @@ type WriteOnlyBeaconState interface {
 	WriteOnlyParticipation
 	WriteOnlyInactivity
 	WriteOnlySyncCommittee
+	WriteOnlyConsolidations
+	WriteOnlyWithdrawals
+	WriteOnlyDeposits
 	SetGenesisTime(val uint64) error
 	SetGenesisValidatorsRoot(val []byte) error
 	SetSlot(val primitives.Slot) error
@@ -98,8 +105,6 @@ type WriteOnlyBeaconState interface {
 	AppendHistoricalRoots(root [32]byte) error
 	AppendHistoricalSummaries(*ethpb.HistoricalSummary) error
 	SetLatestExecutionPayloadHeader(payload interfaces.ExecutionData) error
-	SetNextWithdrawalIndex(i uint64) error
-	SetNextWithdrawalValidatorIndex(i primitives.ValidatorIndex) error
 }
 
 // ReadOnlyValidator defines a struct which only has read access to validator methods.
@@ -110,19 +115,25 @@ type ReadOnlyValidator interface {
 	WithdrawableEpoch() primitives.Epoch
 	ExitEpoch() primitives.Epoch
 	PublicKey() [fieldparams.BLSPubkeyLength]byte
-	WithdrawalCredentials() []byte
+	GetWithdrawalCredentials() []byte
+	Copy() *ethpb.Validator
 	Slashed() bool
 	IsNil() bool
+	HasETH1WithdrawalCredentials() bool
+	HasCompoundingWithdrawalCredentials() bool
+	HasExecutionWithdrawalCredentials() bool
 }
 
 // ReadOnlyValidators defines a struct which only has read access to validators methods.
 type ReadOnlyValidators interface {
 	Validators() []*ethpb.Validator
+	ValidatorsReadOnly() []ReadOnlyValidator
 	ValidatorAtIndex(idx primitives.ValidatorIndex) (*ethpb.Validator, error)
 	ValidatorAtIndexReadOnly(idx primitives.ValidatorIndex) (ReadOnlyValidator, error)
 	ValidatorIndexByPubkey(key [fieldparams.BLSPubkeyLength]byte) (primitives.ValidatorIndex, bool)
 	PublicKeys() ([][fieldparams.BLSPubkeyLength]byte, error)
 	PubkeyAtIndex(idx primitives.ValidatorIndex) [fieldparams.BLSPubkeyLength]byte
+	AggregateKeyFromIndices(idxs []uint64) (bls.PublicKey, error)
 	NumValidators() int
 	ReadFromEveryValidator(f func(idx int, val ReadOnlyValidator) error) error
 }
@@ -172,6 +183,12 @@ type ReadOnlyEth1Data interface {
 	Eth1DepositIndex() uint64
 }
 
+// ReadOnlyExits defines a struct which only has read access to Exit related methods.
+type ReadOnlyExits interface {
+	ExitBalanceToConsume() (primitives.Gwei, error)
+	EarliestExitEpoch() (primitives.Epoch, error)
+}
+
 // ReadOnlyAttestations defines a struct which only has read access to attestations methods.
 type ReadOnlyAttestations interface {
 	PreviousEpochAttestations() ([]*ethpb.PendingAttestation, error)
@@ -180,9 +197,13 @@ type ReadOnlyAttestations interface {
 
 // ReadOnlyWithdrawals defines a struct which only has read access to withdrawal methods.
 type ReadOnlyWithdrawals interface {
-	ExpectedWithdrawals() ([]*enginev1.Withdrawal, error)
+	ExpectedWithdrawals() ([]*enginev1.Withdrawal, uint64, error)
 	NextWithdrawalValidatorIndex() (primitives.ValidatorIndex, error)
 	NextWithdrawalIndex() (uint64, error)
+	PendingBalanceToWithdraw(idx primitives.ValidatorIndex) (uint64, error)
+	PendingPartialWithdrawals() ([]*ethpb.PendingPartialWithdrawal, error)
+	NumPendingPartialWithdrawals() (uint64, error)
+	HasPendingBalanceToWithdraw(idx primitives.ValidatorIndex) (bool, error)
 }
 
 // ReadOnlyParticipation defines a struct which only has read access to participation methods.
@@ -200,6 +221,19 @@ type ReadOnlyInactivity interface {
 type ReadOnlySyncCommittee interface {
 	CurrentSyncCommittee() (*ethpb.SyncCommittee, error)
 	NextSyncCommittee() (*ethpb.SyncCommittee, error)
+}
+
+type ReadOnlyDeposits interface {
+	DepositBalanceToConsume() (primitives.Gwei, error)
+	DepositRequestsStartIndex() (uint64, error)
+	PendingDeposits() ([]*ethpb.PendingDeposit, error)
+}
+
+type ReadOnlyConsolidations interface {
+	ConsolidationBalanceToConsume() (primitives.Gwei, error)
+	EarliestConsolidationEpoch() (primitives.Epoch, error)
+	PendingConsolidations() ([]*ethpb.PendingConsolidation, error)
+	NumPendingConsolidations() (uint64, error)
 }
 
 // WriteOnlyBlockRoots defines a struct which only has write access to block roots methods.
@@ -220,12 +254,13 @@ type WriteOnlyEth1Data interface {
 	SetEth1DataVotes(val []*ethpb.Eth1Data) error
 	AppendEth1DataVotes(val *ethpb.Eth1Data) error
 	SetEth1DepositIndex(val uint64) error
+	ExitEpochAndUpdateChurn(exitBalance primitives.Gwei) (primitives.Epoch, error)
 }
 
 // WriteOnlyValidators defines a struct which only has write access to validators methods.
 type WriteOnlyValidators interface {
 	SetValidators(val []*ethpb.Validator) error
-	ApplyToEveryValidator(f func(idx int, val *ethpb.Validator) (bool, *ethpb.Validator, error)) error
+	ApplyToEveryValidator(f func(idx int, val ReadOnlyValidator) (*ethpb.Validator, error)) error
 	UpdateValidatorAtIndex(idx primitives.ValidatorIndex, val *ethpb.Validator) error
 	AppendValidator(val *ethpb.Validator) error
 }
@@ -280,4 +315,25 @@ type WriteOnlyInactivity interface {
 type WriteOnlySyncCommittee interface {
 	SetCurrentSyncCommittee(val *ethpb.SyncCommittee) error
 	SetNextSyncCommittee(val *ethpb.SyncCommittee) error
+}
+
+type WriteOnlyWithdrawals interface {
+	AppendPendingPartialWithdrawal(ppw *ethpb.PendingPartialWithdrawal) error
+	DequeuePendingPartialWithdrawals(num uint64) error
+	SetNextWithdrawalIndex(i uint64) error
+	SetNextWithdrawalValidatorIndex(i primitives.ValidatorIndex) error
+}
+
+type WriteOnlyConsolidations interface {
+	AppendPendingConsolidation(val *ethpb.PendingConsolidation) error
+	SetConsolidationBalanceToConsume(primitives.Gwei) error
+	SetEarliestConsolidationEpoch(epoch primitives.Epoch) error
+	SetPendingConsolidations(val []*ethpb.PendingConsolidation) error
+}
+
+type WriteOnlyDeposits interface {
+	AppendPendingDeposit(pd *ethpb.PendingDeposit) error
+	SetDepositRequestsStartIndex(index uint64) error
+	SetPendingDeposits(val []*ethpb.PendingDeposit) error
+	SetDepositBalanceToConsume(primitives.Gwei) error
 }

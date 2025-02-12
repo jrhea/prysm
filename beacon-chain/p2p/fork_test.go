@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethereum/go-ethereum/p2p/discover"
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/p2p/enr"
 	ma "github.com/multiformats/go-multiaddr"
@@ -28,14 +27,17 @@ import (
 )
 
 func TestStartDiscv5_DifferentForkDigests(t *testing.T) {
-	port := 2000
+	const port = 2000
+
 	ipAddr, pkey := createAddrAndPrivKey(t)
 	genesisTime := time.Now()
 	genesisValidatorsRoot := make([]byte, fieldparams.RootLength)
 	s := &Service{
 		cfg: &Config{
-			UDPPort:       uint(port),
-			StateNotifier: &mock.MockStateNotifier{},
+			UDPPort:              uint(port),
+			StateNotifier:        &mock.MockStateNotifier{},
+			PingInterval:         testPingInterval,
+			DisableLivenessCheck: true,
 		},
 		genesisTime:           genesisTime,
 		genesisValidatorsRoot: genesisValidatorsRoot,
@@ -44,16 +46,22 @@ func TestStartDiscv5_DifferentForkDigests(t *testing.T) {
 	require.NoError(t, err)
 	defer bootListener.Close()
 
+	// Allow bootnode's table to have its initial refresh. This allows
+	// inbound nodes to be added in.
+	time.Sleep(5 * time.Second)
+
 	bootNode := bootListener.Self()
 	cfg := &Config{
 		Discv5BootStrapAddrs: []string{bootNode.String()},
 		UDPPort:              uint(port),
 		StateNotifier:        &mock.MockStateNotifier{},
+		PingInterval:         testPingInterval,
+		DisableLivenessCheck: true,
 	}
 
-	var listeners []*discover.UDPv5
+	var listeners []*listenerWrapper
 	for i := 1; i <= 5; i++ {
-		port = 3000 + i
+		port := 3000 + i
 		cfg.UDPPort = uint(port)
 		ipAddr, pkey := createAddrAndPrivKey(t)
 
@@ -98,13 +106,14 @@ func TestStartDiscv5_DifferentForkDigests(t *testing.T) {
 	s.genesisTime = genesisTime
 	s.genesisValidatorsRoot = make([]byte, 32)
 	s.dv5Listener = lastListener
-	var addrs []ma.Multiaddr
 
-	for _, n := range nodes {
-		if s.filterPeer(n) {
-			addr, err := convertToSingleMultiAddr(n)
+	addrs := make([]ma.Multiaddr, 0)
+
+	for _, node := range nodes {
+		if s.filterPeer(node) {
+			nodeAddrs, err := retrieveMultiAddrsFromNode(node)
 			require.NoError(t, err)
-			addrs = append(addrs, addr)
+			addrs = append(addrs, nodeAddrs...)
 		}
 	}
 
@@ -114,15 +123,16 @@ func TestStartDiscv5_DifferentForkDigests(t *testing.T) {
 }
 
 func TestStartDiscv5_SameForkDigests_DifferentNextForkData(t *testing.T) {
+	const port = 2000
+
 	params.SetupTestConfigCleanup(t)
 	hook := logTest.NewGlobal()
 	logrus.SetLevel(logrus.TraceLevel)
-	port := 2000
 	ipAddr, pkey := createAddrAndPrivKey(t)
 	genesisTime := time.Now()
 	genesisValidatorsRoot := make([]byte, 32)
 	s := &Service{
-		cfg:                   &Config{UDPPort: uint(port)},
+		cfg:                   &Config{UDPPort: uint(port), PingInterval: testPingInterval, DisableLivenessCheck: true},
 		genesisTime:           genesisTime,
 		genesisValidatorsRoot: genesisValidatorsRoot,
 	}
@@ -130,18 +140,23 @@ func TestStartDiscv5_SameForkDigests_DifferentNextForkData(t *testing.T) {
 	require.NoError(t, err)
 	defer bootListener.Close()
 
+	// Allow bootnode's table to have its initial refresh. This allows
+	// inbound nodes to be added in.
+	time.Sleep(5 * time.Second)
+
 	bootNode := bootListener.Self()
 	cfg := &Config{
 		Discv5BootStrapAddrs: []string{bootNode.String()},
 		UDPPort:              uint(port),
+		PingInterval:         testPingInterval,
+		DisableLivenessCheck: true,
 	}
 
-	var listeners []*discover.UDPv5
+	var listeners []*listenerWrapper
 	for i := 1; i <= 5; i++ {
-		port = 3000 + i
+		port := 3000 + i
 		cfg.UDPPort = uint(port)
 		ipAddr, pkey := createAddrAndPrivKey(t)
-
 		c := params.BeaconConfig().Copy()
 		nextForkEpoch := primitives.Epoch(i)
 		c.ForkVersionSchedule[[4]byte{'A', 'B', 'C', 'D'}] = nextForkEpoch
@@ -188,13 +203,13 @@ func TestStartDiscv5_SameForkDigests_DifferentNextForkData(t *testing.T) {
 	s.genesisTime = genesisTime
 	s.genesisValidatorsRoot = make([]byte, 32)
 	s.dv5Listener = lastListener
-	var addrs []ma.Multiaddr
+	addrs := make([]ma.Multiaddr, 0, len(nodes))
 
-	for _, n := range nodes {
-		if s.filterPeer(n) {
-			addr, err := convertToSingleMultiAddr(n)
+	for _, node := range nodes {
+		if s.filterPeer(node) {
+			nodeAddrs, err := retrieveMultiAddrsFromNode(node)
 			require.NoError(t, err)
-			addrs = append(addrs, addr)
+			addrs = append(addrs, nodeAddrs...)
 		}
 	}
 	if len(addrs) == 0 {
