@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/OffchainLabs/prysm/v7/async/event"
+	chainMock "github.com/OffchainLabs/prysm/v7/beacon-chain/blockchain/testing"
 	"github.com/OffchainLabs/prysm/v7/beacon-chain/cache/depositsnapshot"
 	dbutil "github.com/OffchainLabs/prysm/v7/beacon-chain/db/testing"
 	mockExecution "github.com/OffchainLabs/prysm/v7/beacon-chain/execution/testing"
@@ -99,7 +100,7 @@ func TestStart_OK(t *testing.T) {
 	c := startup.NewClockSynchronizer()
 	require.NoError(t, c.SetClock(startup.NewClock(time.Unix(0, 0), [32]byte{})))
 	waiter := verification.NewInitializerWaiter(
-		c, forkchoice.NewROForkChoice(nil), nil)
+		c, forkchoice.NewROForkChoice(nil), nil, &chainMock.ChainService{})
 
 	web3Service, err := NewService(t.Context(),
 		WithHttpEndpoint(endpoint),
