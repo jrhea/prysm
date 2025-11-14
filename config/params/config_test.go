@@ -46,7 +46,7 @@ func TestConfig_OverrideBeaconConfigTestTeardown(t *testing.T) {
 func TestConfig_DataRace(t *testing.T) {
 	params.SetupTestConfigCleanup(t)
 	wg := new(sync.WaitGroup)
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
@@ -197,7 +197,7 @@ func Test_TargetBlobCount(t *testing.T) {
 
 func fillGVR(value byte) [32]byte {
 	var gvr [32]byte
-	for i := 0; i < len(gvr); i++ {
+	for i := range len(gvr) {
 		gvr[i] = value
 	}
 	return gvr
@@ -232,7 +232,6 @@ func TestBeaconChainConfigSlotDuration(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			require.Equal(t, tt.want, tt.cfg.SlotDuration())
@@ -266,7 +265,6 @@ func TestBeaconChainConfigSlotDurationMillis(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			require.Equal(t, tt.want, tt.cfg.SlotDurationMillis())
@@ -316,7 +314,6 @@ func TestBeaconChainConfigSlotComponentDuration(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			require.Equal(t, tt.want, tt.cfg.SlotComponentDuration(tt.bp))
